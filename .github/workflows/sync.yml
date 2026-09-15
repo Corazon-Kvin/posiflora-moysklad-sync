@@ -1,0 +1,33 @@
+name: Sync Stocks Posiflora to MoySklad
+
+on:
+  schedule:
+    # Запуск каждые 30 минут круглосуточно
+    - cron: '*/30 * * * *'
+  # Кнопка ручного запуска
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install requests
+
+      - name: Run sync script
+        env:
+          POSIFLORA_USER: ${{ secrets.POSIFLORA_USER }}
+          POSIFLORA_PASS: ${{ secrets.POSIFLORA_PASS }}
+          MOYSKLAD_TOKEN: ${{ secrets.MOYSKLAD_TOKEN }}
+          STORE_ID: ${{ secrets.STORE_ID }}
+        run: |
+          python sync_stocks.py
