@@ -159,6 +159,9 @@ while True:
 
 print(f"Найдено активных позиций в наличии в Posiflora: {len(pos_items_data)}")
 
+for name, data in list(pos_items_data.items())[:15]:
+    print(f"Posiflora item: '{name}' | Qty: {data['qty']} | Price: {data['price']/100} руб")
+
 # --- 4. АВТОСОЗДАНИЕ И ОБНОВЛЕНИЕ КАРТОЧЕК В МОЙСКЛАД ---
 print("\n4. Синхронизация каталога товаров (создание новых и обновление цен)...")
 
