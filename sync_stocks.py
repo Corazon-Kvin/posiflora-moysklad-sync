@@ -173,26 +173,28 @@ for name, info in active_bouquets.items():
             ms_session.put(p_href, json={"salePrices": sale_prices_payload}, timeout=20)
         synced_bouquets[name] = {"id": p_id, "href": p_href, "price": price_kopecks}
 
-# --- 7. ПОЛУЧЕНИЕ ФАКТИЧЕСКИХ ОСТАТКОВ ЧЕРЕЗ ВСЕОБЩИЙ ОТЧЕТ ---
+# --- 7. ПОЛУЧЕНИЕ ФАКТИЧЕСКИХ ОСТАТКОВ ЧЕРЕЗ ASSORTMENT ---
 print("\n7. Получение текущих остатков со склада 'Склад Лакма Цветы'...")
 stocks_by_id = {}
 offset = 0
 while True:
-    stock_url = f"{MOYSKLAD_URL}/report/stock/all/current?filter=store={STORE_HREF}&limit=100&offset={offset}"
-    st_res = ms_session.get(stock_url, timeout=30)
+    # В API МойСклад фильтрация остатка по складу задается параметром stockStore
+    assort_url = f"{MOYSKLAD_URL}/entity/assortment?filter=stockStore={STORE_HREF}&limit=100&offset={offset}"
+    st_res = ms_session.get(assort_url, timeout=30)
     if st_res.status_code != 200:
-        print(f"Ошибка получения отчета остатков ({st_res.status_code}):", st_res.text)
+        print(f"Ошибка получения остатков ({st_res.status_code}):", st_res.text)
         break
-    st_rows = st_res.json()
+    data = st_res.json()
+    st_rows = data.get("rows", [])
     if not st_rows:
         break
     for r in st_rows:
-        assortment_id = r.get("assortmentId")
+        item_id = r.get("id")
         stock_val = float(r.get("stock", 0.0) or 0.0)
-        if assortment_id:
-            stocks_by_id[assortment_id] = stock_val
+        if item_id:
+            stocks_by_id[item_id] = stock_val
     offset += len(st_rows)
-    if len(st_rows) < 100:
+    if offset >= data.get("meta", {}).get("size", 0):
         break
 
 print(f"Загружено точных складских остатков: {len(stocks_by_id)}")
