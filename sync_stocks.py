@@ -9,7 +9,8 @@ STORE_ID = os.getenv("STORE_ID", "cde3de25-51e3-4193-a164-84cdebd01e94")
 MOYSKLAD_TOKEN = os.getenv("MOYSKLAD_TOKEN")
 MOYSKLAD_URL = "https://api.moysklad.ru/api/remap/1.2"
 
-STORE_HREF = "https://api.moysklad.ru/api/remap/1.2/entity/store/fc24f096-af79-11f1-0a80-0c0a0039483e"
+STORE_ID_MS = "fc24f096-af79-11f1-0a80-0c0a0039483e"
+STORE_HREF = f"https://api.moysklad.ru/api/remap/1.2/entity/store/{STORE_ID_MS}"
 ORG_HREF = "https://api.moysklad.ru/api/remap/1.2/entity/organization/b34f89b3-c981-11ee-0a80-07770038ef19"
 TARGET_FOLDER_NAME = "Витрина Tilda"
 
@@ -85,7 +86,6 @@ ms_session.headers.update({
     "Content-Type": "application/json"
 })
 
-# Получаем метаданные стандартного типа цены «Цена продажи»
 print("\n3. Получение типа цены продажи из МойСклад...")
 price_type_meta = None
 price_types_res = ms_session.get(f"{MOYSKLAD_URL}/context/companysettings/pricetype", timeout=25)
@@ -93,9 +93,8 @@ if price_types_res.status_code == 200:
     pts = price_types_res.json()
     if pts:
         price_type_meta = pts[0]["meta"]
-        print(f"-> Тип цены найден: {pts[0].get('name', 'Основная')}")
+        print(f"-> Тип цены: {pts[0].get('name', 'Основная')}")
 
-# Находим группу «Витрина Tilda»
 print("\n4. Поиск папки 'Витрина Tilda' в МойСклад...")
 folder_res = ms_session.get(f"{MOYSKLAD_URL}/entity/productfolder?filter=name={TARGET_FOLDER_NAME}", timeout=25).json()
 folder_rows = folder_res.get("rows", [])
@@ -132,15 +131,42 @@ while True:
 
 print(f"Существующих товаров в МойСклад: {len(ms_goods)}")
 
-# --- 6. СОЗДАНИЕ НОВЫХ БУКЕТОВ И АКТУАЛИЗАЦИЯ ЦЕН ---
-print("\n6. Синхронизация витринных букетов с МойСклад...")
+# --- 6. ЗАПРОС ТЕКУЩИХ ФАКТИЧЕСКИХ ОСТАТКОВ В МОЙСКЛАД ---
+print("\n6. Получение текущих остатков со склада 'Склад Лакма Цветы'...")
+current_stocks = {}  # { product_href: stock_qty }
+offset = 0
+while True:
+    stock_res = ms_session.get(
+        f"{MOYSKLAD_URL}/report/stock/bystore?filter=store={STORE_HREF}&limit=100&offset={offset}",
+        timeout=30
+    )
+    if stock_res.status_code != 200:
+        break
+    stock_data = stock_res.json()
+    rows = stock_data.get("rows", [])
+    if not rows:
+        break
+    for r in rows:
+        meta_href = r.get("meta", {}).get("href", "")
+        # Ищем остаток именно по нашему складу
+        st_rows = r.get("stockByStore", [])
+        for sb in st_rows:
+            if STORE_ID_MS in sb.get("meta", {}).get("href", ""):
+                current_stocks[meta_href] = float(sb.get("stock", 0))
+    offset += len(rows)
+    if offset >= stock_data.get("meta", {}).get("size", 0):
+        break
+
+print(f"Загружено записей остатков: {len(current_stocks)}")
+
+# --- 7. СОЗДАНИЕ КАРТОЧЕК И АКТУАЛИЗАЦИЯ ЦЕН ---
+print("\n7. Синхронизация каталога и цен...")
 synced_bouquets = {}
 
 for name, info in active_bouquets.items():
     norm_name = name.lower()
     price_kopecks = int(info["price_rub"] * 100)
     
-    # Формируем структуру цены с обязательным priceType
     price_entry = {"value": price_kopecks}
     if price_type_meta:
         price_entry["priceType"] = {"meta": price_type_meta}
@@ -158,70 +184,59 @@ for name, info in active_bouquets.items():
         c_res = ms_session.post(f"{MOYSKLAD_URL}/entity/product", json=payload, timeout=20)
         if c_res.status_code in (200, 201):
             c_data = c_res.json()
-            synced_bouquets[name] = {
-                "href": c_data["meta"]["href"],
-                "price": price_kopecks
-            }
-            ms_goods[norm_name] = {
-                "name": name,
-                "href": c_data["meta"]["href"],
-                "price": info["price_rub"]
-            }
-            print(f"   Успешно создан!")
+            p_href = c_data["meta"]["href"]
+            synced_bouquets[name] = {"href": p_href, "price": price_kopecks}
+            ms_goods[norm_name] = {"name": name, "href": p_href, "price": info["price_rub"]}
         else:
             print(f"   Ошибка создания '{name}':", c_res.text)
     else:
         current = ms_goods[norm_name]
+        p_href = current["href"]
         if abs(current["price"] - info["price_rub"]) > 0.01:
             print(f"-> Обновляем цену '{name}': {current['price']} ₽ -> {info['price_rub']} ₽")
-            ms_session.put(current["href"], json={"salePrices": sale_prices_payload}, timeout=20)
-        synced_bouquets[name] = {
-            "href": current["href"],
-            "price": price_kopecks
-        }
+            ms_session.put(p_href, json={"salePrices": sale_prices_payload}, timeout=20)
+        synced_bouquets[name] = {"href": p_href, "price": price_kopecks}
 
-# --- 7. ОПРИХОДОВАНИЕ ВИТРИННЫХ БУКЕТОВ (ОСТАТОК 1 ШТ) ---
-print("\n7. Формирование остатков витрины...")
-positions = []
+# --- 8. ОПРИХОДОВАНИЕ НОВЫХ И ОБНУЛЕНИЕ ПРОДАННЫХ ---
+print("\n8. Проверка и выравнивание остатков (целевой остаток = 1 шт)...")
+positions_to_enter = []
+
 for name, data in synced_bouquets.items():
-    positions.append({
-        "quantity": 1.0,
-        "price": data["price"],
-        "assortment": {
-            "meta": {
-                "href": data["href"],
-                "type": "product",
-                "mediaType": "application/json"
+    p_href = data["href"]
+    stock_now = current_stocks.get(p_href, 0.0)
+    
+    if stock_now < 1.0:
+        qty_needed = 1.0 - stock_now
+        print(f"-> Позиция '{name}': текущий остаток {stock_now}, оприходуем {qty_needed} шт")
+        positions_to_enter.append({
+            "quantity": qty_needed,
+            "price": data["price"],
+            "assortment": {
+                "meta": {
+                    "href": p_href,
+                    "type": "product",
+                    "mediaType": "application/json"
+                }
             }
-        }
-    })
+        })
+    else:
+        print(f"-> Позиция '{name}': остаток уже {stock_now} шт, оприходование не требуется")
 
-if positions:
-    print(f"Отправка оприходования для {len(positions)} витринных букетов...")
+if positions_to_enter:
+    print(f"\nОтправка оприходования для {len(positions_to_enter)} букетов...")
     enter_payload = {
-        "organization": {
-            "meta": {
-                "href": ORG_HREF,
-                "type": "organization",
-                "mediaType": "application/json"
-            }
-        },
-        "store": {
-            "meta": {
-                "href": STORE_HREF,
-                "type": "store",
-                "mediaType": "application/json"
-            }
-        },
+        "organization": {"meta": {"href": ORG_HREF, "type": "organization", "mediaType": "application/json"}},
+        "store": {"meta": {"href": STORE_HREF, "type": "store", "mediaType": "application/json"}},
         "applicable": True,
-        "description": "Автосинхронизация витринных букетов из Posiflora",
-        "positions": positions
+        "description": "Автовыравнивание остатков витрины из Posiflora",
+        "positions": positions_to_enter
     }
-
     doc_res = ms_session.post(f"{MOYSKLAD_URL}/entity/enter", json=enter_payload, timeout=60)
     if doc_res.status_code in (200, 201):
-        print("\n>>> ПОЛНЫЙ УСПЕХ: Все витринные букеты созданы с ценами и оприходованы!")
+        print(">>> Оприходование успешно проведено!")
     else:
         print(f"Ошибка оприходования ({doc_res.status_code}):", doc_res.text)
 else:
-    print("Нет активных букетов для оприходования.")
+    print("Все витринные букеты уже имеют нужный остаток. Документ оприходования не создавался.")
+
+print("\n>>> Синхронизация успешно завершена!")
