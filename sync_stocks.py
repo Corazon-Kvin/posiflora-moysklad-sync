@@ -36,14 +36,13 @@ token = resp.json()["data"]["attributes"]["accessToken"]
 pos_session.headers.update({"Authorization": f"Bearer {token}"})
 print("-> Успешная авторизация в Posiflora")
 
-# --- 2. ДИАГНОСТИКА СТРУКТУРЫ ФОТО БУКЕТА ---
-print("\n--- Проверка наличия фото в Posiflora /bouquets ---")
+# --- 2. ИЗУЧЕНИЕ СТРУКТУРЫ БУКЕТА (ДЛЯ ФОТО) ---
+print("\n--- Проверка полей букета на витрине ---")
 try:
     diag_resp = pos_session.get(f"{POSIFLORA_URL}/bouquets", params={
         "filter[store]": STORE_ID,
         "filter[state]": "demonstrated",
-        "page[size]": 3,
-        "include": "images,photo,attachments",
+        "page[size]": 1,
         "sort": "-updatedAt"
     }, timeout=25)
     
@@ -52,30 +51,33 @@ try:
         d_items = d_json.get("data", [])
         if d_items:
             first_b = d_items[0]
-            print("Название букета:", first_b.get("attributes", {}).get("title"))
-            print("Ключи attributes:", list(first_b.get("attributes", {}).keys()))
-            print("Ключи relationships:", list(first_b.get("relationships", {}).keys()))
+            print(f"Название: {first_b.get('attributes', {}).get('title')}")
+            print(f"Ключи attributes: {list(first_b.get('attributes', {}).keys())}")
+            print(f"Ключи relationships: {list(first_b.get('relationships', {}).keys())}")
             
-            # Проверяем, есть ли ссылки на фото в attributes
-            for k, v in first_b.get("attributes", {}).items():
-                if any(sub in k.lower() for sub in ["photo", "image", "pic", "file", "url", "logo"]):
-                    print(f"Найдено фото в attributes -> {k}: {v}")
-
-            # Проверяем included
-            included = d_json.get("included", [])
-            print(f"Количество объектов included: {len(included)}")
-            for inc in included[:5]:
-                print(f"Included тип: {inc.get('type')}, id: {inc.get('id')}, ключи: {list(inc.get('attributes', {}).keys())}")
+            # Распечатаем значения attributes, которые могут содержать ссылку на фото
+            attrs = first_b.get("attributes", {})
+            for k, v in attrs.items():
+                if any(word in k.lower() for word in ["img", "photo", "pic", "file", "url", "media", "logo", "attachment"]):
+                    print(f"Найдено совпадение в attributes: {k} -> {v}")
+                elif isinstance(v, (list, dict)):
+                    print(f"Вложенная структура в attributes: {k} -> {v}")
+                    
+            # Проверим связи relationships
+            rels = first_b.get("relationships", {})
+            for r_name, r_val in rels.items():
+                if any(word in r_name.lower() for word in ["img", "photo", "pic", "file", "media", "attachment"]):
+                    print(f"Найдено фото в relationships: {r_name} -> {r_val}")
         else:
-            print("Нет букетов со статусом demonstrated для теста.")
+            print("Нет букетов со статусом demonstrated.")
     else:
         print(f"Ответ Posiflora ({diag_resp.status_code}):", diag_resp.text[:300])
 except Exception as e:
-    print("Ошибка диагностики фото:", e)
+    print("Ошибка диагностики букета:", e)
 print("--------------------------------------------------\n")
 
-# --- 3. ВЫГРУЗКА ВИТРИННЫХ БУКЕТОВ (СТАТУС demonstrated) ---
-print("\n2. Выгрузка актуальных витринных букетов...")
+# --- 3. ВЫГРУЗКА ВИТРИННЫХ БУКЕТОВ ---
+print("3. Выгрузка актуальных витринных букетов...")
 page = 1
 active_bouquets = {}
 
