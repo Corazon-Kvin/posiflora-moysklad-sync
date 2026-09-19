@@ -161,7 +161,7 @@ for name, info in active_bouquets.items():
             p_id = c_data.get("id")
             synced_bouquets[name] = {"id": p_id, "href": p_href, "price": price_kopecks}
             ms_goods[norm_name] = {"id": p_id, "name": name, "href": p_href, "price": info["price_rub"]}
-            print(f"   Успешно создан!")
+            print("   Успешно создан!")
         else:
             print(f"   Ошибка создания '{name}':", c_res.text)
     else:
@@ -173,26 +173,43 @@ for name, info in active_bouquets.items():
             ms_session.put(p_href, json={"salePrices": sale_prices_payload}, timeout=20)
         synced_bouquets[name] = {"id": p_id, "href": p_href, "price": price_kopecks}
 
-# --- 7. ТОЧНЫЙ ЗАПРОС ОСТАТКОВ ПО КАЖДОМУ БУКЕТУ НА СКЛАДЕ ---
-print("\n7. Проверка текущих остатков на складе 'Склад Лакма Цветы'...")
+# --- 7. ПОЛУЧЕНИЕ ФАКТИЧЕСКИХ ОСТАТКОВ ЧЕРЕЗ ВСЕОБЩИЙ ОТЧЕТ ---
+print("\n7. Получение текущих остатков со склада 'Склад Лакма Цветы'...")
+stocks_by_id = {}
+offset = 0
+while True:
+    stock_url = f"{MOYSKLAD_URL}/report/stock/all/current?filter=store={STORE_HREF}&limit=100&offset={offset}"
+    st_res = ms_session.get(stock_url, timeout=30)
+    if st_res.status_code != 200:
+        print(f"Ошибка получения отчета остатков ({st_res.status_code}):", st_res.text)
+        break
+    st_rows = st_res.json()
+    if not st_rows:
+        break
+    for r in st_rows:
+        assortment_id = r.get("assortmentId")
+        stock_val = float(r.get("stock", 0.0) or 0.0)
+        if assortment_id:
+            stocks_by_id[assortment_id] = stock_val
+    offset += len(st_rows)
+    if len(st_rows) < 100:
+        break
+
+print(f"Загружено точных складских остатков: {len(stocks_by_id)}")
+
+# --- 8. ВЫРАВНИВАНИЕ ОСТАТКОВ (НЕ БОЛЕЕ 1 ШТ) ---
+print("\n8. Проверка и выравнивание остатков (целевой остаток = 1 шт)...")
 positions_to_enter = []
 
 for name, data in synced_bouquets.items():
     p_id = data.get("id")
     p_href = data.get("href")
     
-    # Запрашиваем остаток конкретного товара на целевом складе
-    stock_qty = 0.0
-    try:
-        st_res = ms_session.get(f"{MOYSKLAD_URL}/entity/product/{p_id}?fields=stock", timeout=20)
-        if st_res.status_code == 200:
-            stock_qty = float(st_res.json().get("stock", 0.0) or 0.0)
-    except Exception as ex:
-        print(f"Ошибка запроса остатка для {name}: {ex}")
+    current_qty = stocks_by_id.get(p_id, 0.0)
 
-    if stock_qty < 1.0:
-        qty_needed = 1.0 - stock_qty
-        print(f"-> Позиция '{name}': текущий остаток {stock_qty}, оприходуем {qty_needed} шт")
+    if current_qty < 1.0:
+        qty_needed = 1.0 - current_qty
+        print(f"-> '{name}': текущий остаток {current_qty}, оприходуем {qty_needed} шт")
         positions_to_enter.append({
             "quantity": qty_needed,
             "price": data["price"],
@@ -205,9 +222,8 @@ for name, data in synced_bouquets.items():
             }
         })
     else:
-        print(f"-> Позиция '{name}': остаток уже {stock_qty} шт, оприходование НЕ требуется")
+        print(f"-> '{name}': остаток уже {current_qty} шт, оприходование НЕ требуется")
 
-# --- 8. ОПРИХОДОВАНИЕ ТОЛЬКО ПРИ НЕОБХОДИМОСТИ ---
 if positions_to_enter:
     print(f"\nОтправка оприходования для {len(positions_to_enter)} букетов...")
     enter_payload = {
@@ -223,6 +239,6 @@ if positions_to_enter:
     else:
         print(f"Ошибка оприходования ({doc_res.status_code}):", doc_res.text)
 else:
-    print("\nВсе витринные букеты уже имеют остаток >= 1 шт. Оприходование не требуется.")
+    print("\nВсе витринные букеты уже имеют остаток >= 1 шт. Новые документы не создавались.")
 
 print("\n>>> Синхронизация успешно завершена!")
