@@ -75,17 +75,28 @@ while True:
     page += 1
 
 print(f"Найдено букетов на витрине прямо сейчас: {len(active_bouquets)}")
-for name, info in list(active_bouquets.items())[:10]:
+for name, info in list(active_bouquets.items()):
     print(f"-> {name}: {info['price_rub']} ₽")
 
-# --- 3. АВТОРИЗАЦИЯ В МОЙСКЛАД И ПОИСК ПАПКИ ---
+# --- 3. АВТОРИЗАЦИЯ В МОЙСКЛАД, ПОИСК ПАПКИ И ТИПА ЦЕНЫ ---
 ms_session = requests.Session()
 ms_session.headers.update({
     "Authorization": f"Bearer {MOYSKLAD_TOKEN.strip()}",
     "Content-Type": "application/json"
 })
 
-print("\n3. Поиск папки 'Витрина Tilda' в МойСклад...")
+# Получаем метаданные стандартного типа цены «Цена продажи»
+print("\n3. Получение типа цены продажи из МойСклад...")
+price_type_meta = None
+price_types_res = ms_session.get(f"{MOYSKLAD_URL}/context/companysettings/pricetype", timeout=25)
+if price_types_res.status_code == 200:
+    pts = price_types_res.json()
+    if pts:
+        price_type_meta = pts[0]["meta"]
+        print(f"-> Тип цены найден: {pts[0].get('name', 'Основная')}")
+
+# Находим группу «Витрина Tilda»
+print("\n4. Поиск папки 'Витрина Tilda' в МойСклад...")
 folder_res = ms_session.get(f"{MOYSKLAD_URL}/entity/productfolder?filter=name={TARGET_FOLDER_NAME}", timeout=25).json()
 folder_rows = folder_res.get("rows", [])
 product_folder_meta = None
@@ -95,8 +106,8 @@ if folder_rows:
 else:
     print(f"Внимание: папка '{TARGET_FOLDER_NAME}' не найдена!")
 
-# Загружаем существующие товары из МойСклад
-print("\n4. Получение каталога товаров из МойСклад...")
+# Загружаем существующие товары
+print("\n5. Получение каталога товаров из МойСклад...")
 ms_goods = {}
 offset = 0
 while True:
@@ -121,19 +132,25 @@ while True:
 
 print(f"Существующих товаров в МойСклад: {len(ms_goods)}")
 
-# --- 5. СОЗДАНИЕ НОВЫХ БУКЕТОВ И АКТУАЛИЗАЦИЯ ЦЕН ---
-print("\n5. Синхронизация витринных букетов с МойСклад...")
+# --- 6. СОЗДАНИЕ НОВЫХ БУКЕТОВ И АКТУАЛИЗАЦИЯ ЦЕН ---
+print("\n6. Синхронизация витринных букетов с МойСклад...")
 synced_bouquets = {}
 
 for name, info in active_bouquets.items():
     norm_name = name.lower()
     price_kopecks = int(info["price_rub"] * 100)
     
+    # Формируем структуру цены с обязательным priceType
+    price_entry = {"value": price_kopecks}
+    if price_type_meta:
+        price_entry["priceType"] = {"meta": price_type_meta}
+    sale_prices_payload = [price_entry] if price_kopecks > 0 else []
+
     if norm_name not in ms_goods:
         print(f"-> Создаем карточку букета: '{name}' | {info['price_rub']} ₽")
         payload = {
             "name": name,
-            "salePrices": [{"value": price_kopecks}] if price_kopecks > 0 else []
+            "salePrices": sale_prices_payload
         }
         if product_folder_meta:
             payload["productFolder"] = {"meta": product_folder_meta}
@@ -150,20 +167,21 @@ for name, info in active_bouquets.items():
                 "href": c_data["meta"]["href"],
                 "price": info["price_rub"]
             }
+            print(f"   Успешно создан!")
         else:
             print(f"   Ошибка создания '{name}':", c_res.text)
     else:
         current = ms_goods[norm_name]
         if abs(current["price"] - info["price_rub"]) > 0.01:
             print(f"-> Обновляем цену '{name}': {current['price']} ₽ -> {info['price_rub']} ₽")
-            ms_session.put(current["href"], json={"salePrices": [{"value": price_kopecks}]}, timeout=20)
+            ms_session.put(current["href"], json={"salePrices": sale_prices_payload}, timeout=20)
         synced_bouquets[name] = {
             "href": current["href"],
             "price": price_kopecks
         }
 
-# --- 6. ОПРИХОДОВАНИЕ ВИТРИННЫХ БУКЕТОВ (ОСТАТОК 1 ШТ) ---
-print("\n6. Формирование остатков витрины...")
+# --- 7. ОПРИХОДОВАНИЕ ВИТРИННЫХ БУКЕТОВ (ОСТАТОК 1 ШТ) ---
+print("\n7. Формирование остатков витрины...")
 positions = []
 for name, data in synced_bouquets.items():
     positions.append({
@@ -202,7 +220,7 @@ if positions:
 
     doc_res = ms_session.post(f"{MOYSKLAD_URL}/entity/enter", json=enter_payload, timeout=60)
     if doc_res.status_code in (200, 201):
-        print("\n>>> ПОЛНЫЙ УСПЕХ: Витринные букеты созданы, цены и остатки актуализированы!")
+        print("\n>>> ПОЛНЫЙ УСПЕХ: Все витринные букеты созданы с ценами и оприходованы!")
     else:
         print(f"Ошибка оприходования ({doc_res.status_code}):", doc_res.text)
 else:
