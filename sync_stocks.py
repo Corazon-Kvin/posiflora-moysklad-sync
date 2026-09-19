@@ -38,7 +38,7 @@ print("-> Успешная авторизация в Posiflora")
 # --- 2. ВЫГРУЗКА ВИТРИННЫХ БУКЕТОВ (СТАТУС demonstrated) ---
 print("\n2. Выгрузка актуальных витринных букетов (demonstrated)...")
 page = 1
-active_bouquets = {}  # { name: {"price_rub": X, "pos_id": Y} }
+active_bouquets = {}
 
 while True:
     bouquets_resp = pos_session.get(f"{POSIFLORA_URL}/bouquets", params={
@@ -102,10 +102,8 @@ product_folder_meta = None
 if folder_rows:
     product_folder_meta = folder_rows[0]["meta"]
     print(f"-> Папка найдена: {folder_rows[0]['name']}")
-else:
-    print(f"Внимание: папка '{TARGET_FOLDER_NAME}' не найдена!")
 
-# Загружаем существующие товары
+# --- 5. ПОЛУЧЕНИЕ КАТАЛОГА ТОВАРОВ ИЗ МОЙСКЛАД ---
 print("\n5. Получение каталога товаров из МойСклад...")
 ms_goods = {}
 offset = 0
@@ -120,7 +118,10 @@ while True:
         if item.get("salePrices") and len(item["salePrices"]) > 0:
             sale_price = item["salePrices"][0].get("value", 0) / 100
         
-        ms_goods[item["name"].strip().lower()] = {
+        item_id = item.get("id")
+        norm_name = item["name"].strip().lower()
+        ms_goods[norm_name] = {
+            "id": item_id,
             "name": item["name"].strip(),
             "href": item["meta"]["href"],
             "price": sale_price
@@ -131,36 +132,8 @@ while True:
 
 print(f"Существующих товаров в МойСклад: {len(ms_goods)}")
 
-# --- 6. ЗАПРОС ТЕКУЩИХ ФАКТИЧЕСКИХ ОСТАТКОВ В МОЙСКЛАД ---
-print("\n6. Получение текущих остатков со склада 'Склад Лакма Цветы'...")
-current_stocks = {}  # { product_href: stock_qty }
-offset = 0
-while True:
-    stock_res = ms_session.get(
-        f"{MOYSKLAD_URL}/report/stock/bystore?filter=store={STORE_HREF}&limit=100&offset={offset}",
-        timeout=30
-    )
-    if stock_res.status_code != 200:
-        break
-    stock_data = stock_res.json()
-    rows = stock_data.get("rows", [])
-    if not rows:
-        break
-    for r in rows:
-        meta_href = r.get("meta", {}).get("href", "")
-        # Ищем остаток именно по нашему складу
-        st_rows = r.get("stockByStore", [])
-        for sb in st_rows:
-            if STORE_ID_MS in sb.get("meta", {}).get("href", ""):
-                current_stocks[meta_href] = float(sb.get("stock", 0))
-    offset += len(rows)
-    if offset >= stock_data.get("meta", {}).get("size", 0):
-        break
-
-print(f"Загружено записей остатков: {len(current_stocks)}")
-
-# --- 7. СОЗДАНИЕ КАРТОЧЕК И АКТУАЛИЗАЦИЯ ЦЕН ---
-print("\n7. Синхронизация каталога и цен...")
+# --- 6. СОЗДАНИЕ НОВЫХ КАРТОЧЕК И АКТУАЛИЗАЦИЯ ЦЕН ---
+print("\n6. Синхронизация каталога и цен...")
 synced_bouquets = {}
 
 for name, info in active_bouquets.items():
@@ -185,29 +158,41 @@ for name, info in active_bouquets.items():
         if c_res.status_code in (200, 201):
             c_data = c_res.json()
             p_href = c_data["meta"]["href"]
-            synced_bouquets[name] = {"href": p_href, "price": price_kopecks}
-            ms_goods[norm_name] = {"name": name, "href": p_href, "price": info["price_rub"]}
+            p_id = c_data.get("id")
+            synced_bouquets[name] = {"id": p_id, "href": p_href, "price": price_kopecks}
+            ms_goods[norm_name] = {"id": p_id, "name": name, "href": p_href, "price": info["price_rub"]}
+            print(f"   Успешно создан!")
         else:
             print(f"   Ошибка создания '{name}':", c_res.text)
     else:
         current = ms_goods[norm_name]
         p_href = current["href"]
+        p_id = current["id"]
         if abs(current["price"] - info["price_rub"]) > 0.01:
             print(f"-> Обновляем цену '{name}': {current['price']} ₽ -> {info['price_rub']} ₽")
             ms_session.put(p_href, json={"salePrices": sale_prices_payload}, timeout=20)
-        synced_bouquets[name] = {"href": p_href, "price": price_kopecks}
+        synced_bouquets[name] = {"id": p_id, "href": p_href, "price": price_kopecks}
 
-# --- 8. ОПРИХОДОВАНИЕ НОВЫХ И ОБНУЛЕНИЕ ПРОДАННЫХ ---
-print("\n8. Проверка и выравнивание остатков (целевой остаток = 1 шт)...")
+# --- 7. ТОЧНЫЙ ЗАПРОС ОСТАТКОВ ПО КАЖДОМУ БУКЕТУ НА СКЛАДЕ ---
+print("\n7. Проверка текущих остатков на складе 'Склад Лакма Цветы'...")
 positions_to_enter = []
 
 for name, data in synced_bouquets.items():
-    p_href = data["href"]
-    stock_now = current_stocks.get(p_href, 0.0)
+    p_id = data.get("id")
+    p_href = data.get("href")
     
-    if stock_now < 1.0:
-        qty_needed = 1.0 - stock_now
-        print(f"-> Позиция '{name}': текущий остаток {stock_now}, оприходуем {qty_needed} шт")
+    # Запрашиваем остаток конкретного товара на целевом складе
+    stock_qty = 0.0
+    try:
+        st_res = ms_session.get(f"{MOYSKLAD_URL}/entity/product/{p_id}?fields=stock", timeout=20)
+        if st_res.status_code == 200:
+            stock_qty = float(st_res.json().get("stock", 0.0) or 0.0)
+    except Exception as ex:
+        print(f"Ошибка запроса остатка для {name}: {ex}")
+
+    if stock_qty < 1.0:
+        qty_needed = 1.0 - stock_qty
+        print(f"-> Позиция '{name}': текущий остаток {stock_qty}, оприходуем {qty_needed} шт")
         positions_to_enter.append({
             "quantity": qty_needed,
             "price": data["price"],
@@ -220,8 +205,9 @@ for name, data in synced_bouquets.items():
             }
         })
     else:
-        print(f"-> Позиция '{name}': остаток уже {stock_now} шт, оприходование не требуется")
+        print(f"-> Позиция '{name}': остаток уже {stock_qty} шт, оприходование НЕ требуется")
 
+# --- 8. ОПРИХОДОВАНИЕ ТОЛЬКО ПРИ НЕОБХОДИМОСТИ ---
 if positions_to_enter:
     print(f"\nОтправка оприходования для {len(positions_to_enter)} букетов...")
     enter_payload = {
@@ -237,6 +223,6 @@ if positions_to_enter:
     else:
         print(f"Ошибка оприходования ({doc_res.status_code}):", doc_res.text)
 else:
-    print("Все витринные букеты уже имеют нужный остаток. Документ оприходования не создавался.")
+    print("\nВсе витринные букеты уже имеют остаток >= 1 шт. Оприходование не требуется.")
 
 print("\n>>> Синхронизация успешно завершена!")
