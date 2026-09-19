@@ -34,42 +34,58 @@ token = resp.json()["data"]["attributes"]["accessToken"]
 pos_session.headers.update({"Authorization": f"Bearer {token}"})
 print("-> Успешная авторизация в Posiflora")
 
-# --- ТЕСТ ЭНДПОИНТА ВИТРИННЫХ БУКЕТОВ POSIFLORA (САМЫЕ СВЕЖИЕ) ---
-print("\n--- Запрос к /bouquets (Свежие витринные букеты) ---")
-try:
+# --- 2. ВЫГРУЗКА ВИТРИННЫХ БУКЕТОВ (СТАТУС demonstrated) ---
+print("\n2. Выгрузка актуальных витринных букетов (demonstrated)...")
+page = 1
+active_bouquets = {}  # { name: {"price_rub": X, "pos_id": Y} }
+
+while True:
     bouquets_resp = pos_session.get(f"{POSIFLORA_URL}/bouquets", params={
         "filter[store]": STORE_ID,
-        "page[size]": 40,
+        "filter[state]": "demonstrated",
+        "page[number]": page,
+        "page[size]": 50,
         "sort": "-updatedAt"
     }, timeout=25)
 
-    print(f"Статус ответа /bouquets: {bouquets_resp.status_code}")
-    if bouquets_resp.status_code == 200:
-        b_data = bouquets_resp.json()
-        b_items = b_data.get("data", [])
-        print(f"Найдено букетов в ответе: {len(b_items)}")
-        for b in b_items[:20]:
-            attrs = b.get("attributes", {})
-            b_id = b.get("id")
-            title = attrs.get("title") or attrs.get("name") or "Без названия"
-            price = attrs.get("price") or attrs.get("amount") or 0
-            state = attrs.get("state") or attrs.get("status")
-            updated = attrs.get("updatedAt", "")[:19]
-            print(f"Дата: {updated} | Статус: {state} | Цена: {price} ₽ | '{title}'")
-    else:
-        print("Ответ сервера /bouquets:", bouquets_resp.text)
-except Exception as e:
-    print(f"Ошибка вызова /bouquets: {e}")
-print("--------------------------------------------------\n")
+    if bouquets_resp.status_code != 200:
+        print(f"Ошибка запроса букетов ({bouquets_resp.status_code}):", bouquets_resp.text)
+        break
 
-# --- 2. АВТОРИЗАЦИЯ В МОЙСКЛАД ---
+    b_json = bouquets_resp.json()
+    b_list = b_json.get("data", [])
+    if not b_list:
+        break
+
+    for b in b_list:
+        attrs = b.get("attributes", {})
+        state = attrs.get("state") or attrs.get("status")
+        if state == "demonstrated":
+            title = (attrs.get("title") or attrs.get("name") or "").strip()
+            price = float(attrs.get("price") or attrs.get("amount") or 0)
+            b_id = b.get("id")
+            if title:
+                active_bouquets[title] = {
+                    "price_rub": price,
+                    "pos_id": b_id
+                }
+
+    if len(b_list) < 50:
+        break
+    page += 1
+
+print(f"Найдено букетов на витрине прямо сейчас: {len(active_bouquets)}")
+for name, info in list(active_bouquets.items())[:10]:
+    print(f"-> {name}: {info['price_rub']} ₽")
+
+# --- 3. АВТОРИЗАЦИЯ В МОЙСКЛАД И ПОИСК ПАПКИ ---
 ms_session = requests.Session()
 ms_session.headers.update({
     "Authorization": f"Bearer {MOYSKLAD_TOKEN.strip()}",
     "Content-Type": "application/json"
 })
 
-print("2. Поиск папки 'Витрина Tilda' в МойСклад...")
+print("\n3. Поиск папки 'Витрина Tilda' в МойСклад...")
 folder_res = ms_session.get(f"{MOYSKLAD_URL}/entity/productfolder?filter=name={TARGET_FOLDER_NAME}", timeout=25).json()
 folder_rows = folder_res.get("rows", [])
 product_folder_meta = None
@@ -77,9 +93,10 @@ if folder_rows:
     product_folder_meta = folder_rows[0]["meta"]
     print(f"-> Папка найдена: {folder_rows[0]['name']}")
 else:
-    print(f"Внимание: папка '{TARGET_FOLDER_NAME}' не найдена! Товары будут создаваться в корне каталога.")
+    print(f"Внимание: папка '{TARGET_FOLDER_NAME}' не найдена!")
 
-print("\n3. Получение текущего каталога из МойСклад...")
+# Загружаем существующие товары из МойСклад
+print("\n4. Получение каталога товаров из МойСклад...")
 ms_goods = {}
 offset = 0
 while True:
@@ -91,7 +108,7 @@ while True:
     for item in rows:
         sale_price = 0
         if item.get("salePrices") and len(item["salePrices"]) > 0:
-            sale_price = item["salePrices"][0].get("value", 0)
+            sale_price = item["salePrices"][0].get("value", 0) / 100
         
         ms_goods[item["name"].strip().lower()] = {
             "name": item["name"].strip(),
@@ -102,149 +119,68 @@ while True:
     if offset >= data.get("meta", {}).get("size", 0):
         break
 
-print(f"Загружено существующих товаров из МойСклад: {len(ms_goods)}")
+print(f"Существующих товаров в МойСклад: {len(ms_goods)}")
 
-# --- 4. ВЫГРУЗКА ДАННЫХ ИЗ POSIFLORA (ОСТАТКИ + ЦЕНЫ СЫРЬЯ) ---
-print("\n4. Выгрузка каталога, остатков и цен из Posiflora...")
-page = 1
-pos_items_data = {}
+# --- 5. СОЗДАНИЕ НОВЫХ БУКЕТОВ И АКТУАЛИЗАЦИЯ ЦЕН ---
+print("\n5. Синхронизация витринных букетов с МойСклад...")
+synced_bouquets = {}
 
-while True:
-    params = {
-        "page[number]": page,
-        "page[size]": 50,
-        "include": "category,logo,prices,balances",
-        "sort": "title",
-        "distribution": "true",
-        "concealment": "false",
-        "filter[store]": STORE_ID
-    }
-    r = pos_session.get(f"{POSIFLORA_URL}/catalog", params=params, timeout=25)
-    if r.status_code != 200:
-        break
-
-    res_json = r.json()
-    items = res_json.get("data", [])
-    if not items:
-        break
-
-    included = res_json.get("included", [])
+for name, info in active_bouquets.items():
+    norm_name = name.lower()
+    price_kopecks = int(info["price_rub"] * 100)
     
-    balances_map = {}
-    prices_map = {}
-    for inc in included:
-        inc_type = inc.get("type")
-        inc_id = str(inc.get("id", ""))
-        attrs = inc.get("attributes", {})
-        
-        if inc_type == "item-balances":
-            stock = float(attrs.get("qtyOnWindow", 0) or 0)
-            if stock > 0:
-                balances_map[inc_id] = stock
-        elif inc_type == "prices":
-            price_val = attrs.get("amount", 0) or 0
-            if price_val > 0:
-                prices_map[inc_id] = int(price_val)
-
-    for item in items:
-        title = item.get("attributes", {}).get("title", "").strip()
-        item_id = str(item.get("id", ""))
-        prices_rel = item.get("relationships", {}).get("prices", {}).get("data", [])
-        
-        item_stock = 0.0
-        item_price_kopecks = 0
-
-        if isinstance(prices_rel, list):
-            for p in prices_rel:
-                pid = str(p.get("id", ""))
-                if pid in balances_map:
-                    item_stock += balances_map[pid]
-                if pid in prices_map and item_price_kopecks == 0:
-                    item_price_kopecks = prices_map[pid]
-        elif isinstance(prices_rel, dict):
-            pid = str(prices_rel.get("id", ""))
-            if pid in balances_map:
-                item_stock += balances_map[pid]
-            if pid in prices_map:
-                item_price_kopecks = prices_map[pid]
-
-        composite_key = f"{item_id}-{STORE_ID}"
-        if composite_key in balances_map:
-            item_stock += balances_map[composite_key]
-
-        if item_stock > 0 and title:
-            pos_items_data[title] = {
-                "qty": item_stock,
-                "price": item_price_kopecks
-            }
-
-    if len(items) < 50:
-        break
-    page += 1
-
-print(f"Найдено активных позиций в наличии в Posiflora: {len(pos_items_data)}")
-
-# --- 5. АВТОСОЗДАНИЕ И ОБНОВЛЕНИЕ КАРТОЧЕК В МОЙСКЛАД ---
-print("\n5. Синхронизация каталога товаров (создание новых и обновление цен)...")
-
-for title, item_info in pos_items_data.items():
-    norm_title = title.lower()
-    price_kopecks = item_info["price"]
-    
-    if norm_title not in ms_goods:
-        print(f"-> Создаем новый товар в МойСклад: '{title}' (цена: {price_kopecks / 100:.2f} ₽)")
-        new_prod_payload = {
-            "name": title,
+    if norm_name not in ms_goods:
+        print(f"-> Создаем карточку букета: '{name}' | {info['price_rub']} ₽")
+        payload = {
+            "name": name,
             "salePrices": [{"value": price_kopecks}] if price_kopecks > 0 else []
         }
         if product_folder_meta:
-            new_prod_payload["productFolder"] = {"meta": product_folder_meta}
+            payload["productFolder"] = {"meta": product_folder_meta}
 
-        create_res = ms_session.post(f"{MOYSKLAD_URL}/entity/product", json=new_prod_payload, timeout=20)
-        if create_res.status_code in (200, 201):
-            created_data = create_res.json()
-            ms_goods[norm_title] = {
-                "name": title,
-                "href": created_data["meta"]["href"],
+        c_res = ms_session.post(f"{MOYSKLAD_URL}/entity/product", json=payload, timeout=20)
+        if c_res.status_code in (200, 201):
+            c_data = c_res.json()
+            synced_bouquets[name] = {
+                "href": c_data["meta"]["href"],
                 "price": price_kopecks
             }
+            ms_goods[norm_name] = {
+                "name": name,
+                "href": c_data["meta"]["href"],
+                "price": info["price_rub"]
+            }
         else:
-            print(f"   Ошибка создания '{title}':", create_res.text)
-
+            print(f"   Ошибка создания '{name}':", c_res.text)
     else:
-        current = ms_goods[norm_title]
-        if price_kopecks > 0 and current["price"] != price_kopecks:
-            print(f"-> Обновляем цену для '{title}': было {current['price'] / 100:.2f} ₽, стало {price_kopecks / 100:.2f} ₽")
-            update_payload = {
-                "salePrices": [{"value": price_kopecks}]
-            }
-            upd_res = ms_session.put(current["href"], json=update_payload, timeout=20)
-            if upd_res.status_code == 200:
-                current["price"] = price_kopecks
+        current = ms_goods[norm_name]
+        if abs(current["price"] - info["price_rub"]) > 0.01:
+            print(f"-> Обновляем цену '{name}': {current['price']} ₽ -> {info['price_rub']} ₽")
+            ms_session.put(current["href"], json={"salePrices": [{"value": price_kopecks}]}, timeout=20)
+        synced_bouquets[name] = {
+            "href": current["href"],
+            "price": price_kopecks
+        }
 
-# --- 6. ФОРМИРОВАНИЕ И ПРОВОДКА ОПРИХОДОВАНИЯ ---
-print("\n6. Формирование строк оприходования остатков...")
+# --- 6. ОПРИХОДОВАНИЕ ВИТРИННЫХ БУКЕТОВ (ОСТАТОК 1 ШТ) ---
+print("\n6. Формирование остатков витрины...")
 positions = []
-for title, item_info in pos_items_data.items():
-    matched = ms_goods.get(title.lower())
-    if matched:
-        positions.append({
-            "quantity": item_info["qty"],
-            "price": matched["price"],
-            "assortment": {
-                "meta": {
-                    "href": matched["href"],
-                    "type": "product",
-                    "mediaType": "application/json"
-                }
+for name, data in synced_bouquets.items():
+    positions.append({
+        "quantity": 1.0,
+        "price": data["price"],
+        "assortment": {
+            "meta": {
+                "href": data["href"],
+                "type": "product",
+                "mediaType": "application/json"
             }
-        })
-
-print(f"Готово к оприходованию: {len(positions)} позиций")
+        }
+    })
 
 if positions:
-    print("\n7. Отправка документа 'Оприходование' в МойСклад...")
-    payload = {
+    print(f"Отправка оприходования для {len(positions)} витринных букетов...")
+    enter_payload = {
         "organization": {
             "meta": {
                 "href": ORG_HREF,
@@ -260,14 +196,14 @@ if positions:
             }
         },
         "applicable": True,
-        "description": "Автосинхронизация остатков и цен из Posiflora (GitHub Actions)",
+        "description": "Автосинхронизация витринных букетов из Posiflora",
         "positions": positions
     }
 
-    doc_res = ms_session.post(f"{MOYSKLAD_URL}/entity/enter", json=payload, timeout=60)
+    doc_res = ms_session.post(f"{MOYSKLAD_URL}/entity/enter", json=enter_payload, timeout=60)
     if doc_res.status_code in (200, 201):
-        print("\n>>> УСПЕШНО: Каталог актуализирован, остатки и цены оприходованы в МойСклад!")
+        print("\n>>> ПОЛНЫЙ УСПЕХ: Витринные букеты созданы, цены и остатки актуализированы!")
     else:
         print(f"Ошибка оприходования ({doc_res.status_code}):", doc_res.text)
 else:
-    print("Позиций для оприходования не найдено.")
+    print("Нет активных букетов для оприходования.")
