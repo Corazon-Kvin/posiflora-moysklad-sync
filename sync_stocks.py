@@ -34,12 +34,12 @@ token = resp.json()["data"]["attributes"]["accessToken"]
 pos_session.headers.update({"Authorization": f"Bearer {token}"})
 print("-> Успешная авторизация в Posiflora")
 
-# --- ТЕСТ ЭНДПОИНТА ВИТРИННЫХ БУКЕТОВ POSIFLORA ---
-print("\n--- Запрос к /bouquets (Витрина Posiflora) ---")
+# --- ТЕСТ ЭНДПОИНТА ВИТРИННЫХ БУКЕТОВ POSIFLORA (САМЫЕ СВЕЖИЕ) ---
+print("\n--- Запрос к /bouquets (Свежие витринные букеты) ---")
 try:
-   bouquets_resp = pos_session.get(f"{POSIFLORA_URL}/bouquets", params={
+    bouquets_resp = pos_session.get(f"{POSIFLORA_URL}/bouquets", params={
         "filter[store]": STORE_ID,
-        "page[size]": 30,
+        "page[size]": 40,
         "sort": "-updatedAt"
     }, timeout=25)
 
@@ -47,14 +47,15 @@ try:
     if bouquets_resp.status_code == 200:
         b_data = bouquets_resp.json()
         b_items = b_data.get("data", [])
-        print(f"Найдено букетов на витрине: {len(b_items)}")
-        for b in b_items[:15]:
+        print(f"Найдено букетов в ответе: {len(b_items)}")
+        for b in b_items[:20]:
             attrs = b.get("attributes", {})
             b_id = b.get("id")
             title = attrs.get("title") or attrs.get("name") or "Без названия"
             price = attrs.get("price") or attrs.get("amount") or 0
             state = attrs.get("state") or attrs.get("status")
-            print(f"ID: {b_id} | Название: '{title}' | Цена: {price} | Статус: {state}")
+            updated = attrs.get("updatedAt", "")[:19]
+            print(f"Дата: {updated} | Статус: {state} | Цена: {price} ₽ | '{title}'")
     else:
         print("Ответ сервера /bouquets:", bouquets_resp.text)
 except Exception as e:
@@ -103,7 +104,7 @@ while True:
 
 print(f"Загружено существующих товаров из МойСклад: {len(ms_goods)}")
 
-# --- 4. ВЫГРУЗКА ДАННЫХ ИЗ POSIFLORA (ОСТАТКИ + ЦЕНЫ) ---
+# --- 4. ВЫГРУЗКА ДАННЫХ ИЗ POSIFLORA (ОСТАТКИ + ЦЕНЫ СЫРЬЯ) ---
 print("\n4. Выгрузка каталога, остатков и цен из Posiflora...")
 page = 1
 pos_items_data = {}
