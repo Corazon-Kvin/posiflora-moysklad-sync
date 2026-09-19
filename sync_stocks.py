@@ -37,9 +37,10 @@ print("-> Успешная авторизация в Posiflora")
 # --- ТЕСТ ЭНДПОИНТА ВИТРИННЫХ БУКЕТОВ POSIFLORA ---
 print("\n--- Запрос к /bouquets (Витрина Posiflora) ---")
 try:
-    bouquets_resp = pos_session.get(f"{POSIFLORA_URL}/bouquets", params={
+   bouquets_resp = pos_session.get(f"{POSIFLORA_URL}/bouquets", params={
         "filter[store]": STORE_ID,
-        "page[size]": 20
+        "page[size]": 30,
+        "sort": "-updatedAt"
     }, timeout=25)
 
     print(f"Статус ответа /bouquets: {bouquets_resp.status_code}")
