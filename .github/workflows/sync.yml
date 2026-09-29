@@ -15,15 +15,24 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install dependencies
         run: |
-          pip install requests
+          pip install requests python-dotenv
 
-      - name: Run sync script
+      - name: Run full catalog sync (create new products & photos)
+        env:
+          POSIFLORA_USER: ${{ secrets.POSIFLORA_USER }}
+          POSIFLORA_PASS: ${{ secrets.POSIFLORA_PASS }}
+          MOYSKLAD_TOKEN: ${{ secrets.MOYSKLAD_TOKEN }}
+          STORE_ID: ${{ secrets.STORE_ID }}
+        run: |
+          python sync_full_catalog.py
+
+      - name: Run stock calibration (window & flowers limits)
         env:
           POSIFLORA_USER: ${{ secrets.POSIFLORA_USER }}
           POSIFLORA_PASS: ${{ secrets.POSIFLORA_PASS }}
