@@ -51,12 +51,19 @@ while True:
     rows = res.json().get("rows", [])
     if not rows: break
     for item in rows:
-        ms_goods_by_name[item["name"].strip().lower()] = {"id": item["id"], "href": item["meta"]["href"], "price": item.get("salePrices", [{}])[0].get("value", 0) if item.get("salePrices") else 0}
-        ms_goods_by_id[item["id"]] = ms_goods_by_name[item["name"].strip().lower()]
+        clean_name = item["name"].strip().lower()
+        info = {
+            "id": item["id"],
+            "name": item["name"].strip(), # <-- Исправлено: добавлено имя
+            "href": item["meta"]["href"],
+            "price": item.get("salePrices", [{}])[0].get("value", 0) if item.get("salePrices") else 0
+        }
+        ms_goods_by_name[clean_name] = info
+        ms_goods_by_id[item["id"]] = info
     offset += len(rows)
     if len(rows) < 100: break
 
-# --- 2. Сбор каталога из Posiflora (только с ценой) ---
+# --- 2. Сбор каталога из Posiflora ---
 print("\n2. Сбор каталога из Posiflora...")
 pos_catalog = {}
 
@@ -115,8 +122,14 @@ for key, item_data in pos_catalog.items():
         res_create = ms_session.post(f"{MOYSKLAD_URL}/entity/product", json=payload)
         if res_create.status_code in (200, 201):
             created = res_create.json()
-            ms_goods_by_name[key] = {"id": created["id"], "href": created["meta"]["href"], "price": item_data["price"]}
-            ms_goods_by_id[created["id"]] = ms_goods_by_name[key]
+            info = {
+                "id": created["id"], 
+                "name": created["name"], # <-- Исправлено: добавлено имя
+                "href": created["meta"]["href"], 
+                "price": item_data["price"]
+            }
+            ms_goods_by_name[key] = info
+            ms_goods_by_id[created["id"]] = info
             print(f"  [+] Создан: {item_data['title']}")
             
             if item_data["image_url"]:
@@ -149,7 +162,7 @@ for (a_id, s_id), cur_stock in stocks_by_store.items():
     if s_id != TARGET_STORE_ID or cur_stock <= 0: continue
     good = ms_goods_by_id.get(a_id)
     if not good: continue
-    target = pos_catalog.get(good["name"].lower(), {}).get("stock", 0.0)
+    target = pos_catalog.get(good.get("name", "").lower(), {}).get("stock", 0.0)
     if cur_stock > target:
         loss_positions.append({"quantity": round(cur_stock - target, 2), "assortment": {"meta": {"href": good["href"], "type": "product", "mediaType": "application/json"}}})
 
