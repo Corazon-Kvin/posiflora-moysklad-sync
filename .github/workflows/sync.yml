@@ -23,7 +23,7 @@ jobs:
         run: |
           pip install requests python-dotenv
 
-      - name: Run full catalog sync (create new products & photos)
+      - name: Run full catalog sync
         env:
           POSIFLORA_USER: ${{ secrets.POSIFLORA_USER }}
           POSIFLORA_PASS: ${{ secrets.POSIFLORA_PASS }}
@@ -31,12 +31,3 @@ jobs:
           STORE_ID: ${{ secrets.STORE_ID }}
         run: |
           python sync_full_catalog.py
-
-      - name: Run stock calibration (window & flowers limits)
-        env:
-          POSIFLORA_USER: ${{ secrets.POSIFLORA_USER }}
-          POSIFLORA_PASS: ${{ secrets.POSIFLORA_PASS }}
-          MOYSKLAD_TOKEN: ${{ secrets.MOYSKLAD_TOKEN }}
-          STORE_ID: ${{ secrets.STORE_ID }}
-        run: |
-          python sync_stocks.py
