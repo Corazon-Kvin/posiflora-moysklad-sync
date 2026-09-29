@@ -13,7 +13,6 @@ POSIFLORA_URL = "https://lakmaflowers.posiflora.com/api/v1"
 MOYSKLAD_TOKEN = os.getenv("MOYSKLAD_TOKEN", "d528d07b79305bf9859c706da2cbd62c7777ecf0")
 MOYSKLAD_URL = "https://api.moysklad.ru/api/remap/1.2"
 
-# Целевая папка и склад
 TARGET_FOLDER_ID = "d1bd2ba3-af7a-11f1-0a80-02f300382021"
 TARGET_STORE_ID = "fc24f096-af79-11f1-0a80-0c0a0039483e"
 ORG_ID = "b34f89b3-c981-11ee-0a80-07770038ef19"
@@ -68,10 +67,10 @@ print(f"Всего товаров в МоемСкладе: {len(ms_goods_by_name
 print("\n2. Сбор каталога из Posiflora...")
 pos_catalog = {}
 
-# Загружаем букеты витрины (со статусом on_window)
+# Букеты витрины (сортируем по свежести sort=-createdAt, ищем статус demonstrated)
 page = 1
 while True:
-    r = pos_session.get(f"{POSIFLORA_URL}/bouquets?filter[status]=on_window&page[size]=100&page[number]={page}&include=logo", timeout=25)
+    r = pos_session.get(f"{POSIFLORA_URL}/bouquets?sort=-createdAt&page[size]=100&page[number]={page}&include=logo", timeout=25)
     if r.status_code != 200:
         break
     res_data = r.json()
@@ -85,14 +84,17 @@ while True:
         attrs = b.get("attributes", {})
         title = attrs.get("title", "").strip()
         status = attrs.get("status", "")
-        # Читаем цену из правильных полей: saleAmount, amount, trueSaleAmount
+        completed_at = attrs.get("completedAt")
+        
+        # Витринный букет: статус demonstrated и не закрыт/не продан
+        is_on_showcase = (status == "demonstrated" and not completed_at)
+        
         raw_price = attrs.get("saleAmount") or attrs.get("amount") or attrs.get("trueSaleAmount") or attrs.get("price") or 0
-        price = float(raw_price) * 100  # В МоемСкладе копейки
+        price = float(raw_price) * 100
         
         if not title:
             continue
             
-        # Если в букете цена не указана, но товар уже есть в МС - берем цену оттуда
         if price <= 0 and title.lower() in ms_goods_by_name:
             price = ms_goods_by_name[title.lower()]["price"]
             
@@ -102,19 +104,29 @@ while True:
         logo_rel = b.get("relationships", {}).get("logo", {}).get("data")
         logo_id = str(logo_rel.get("id")) if logo_rel else None
 
-        pos_catalog[title.lower()] = {
-            "title": title, 
-            "price": price, 
-            "stock": 1.0,  # on_window гарантирует наличие на витрине
-            "image_url": logos.get(logo_id)
-        }
+        k = title.lower()
+        if k not in pos_catalog:
+            pos_catalog[k] = {
+                "title": title, 
+                "price": price, 
+                "stock": 1.0 if is_on_showcase else 0.0,
+                "image_url": logos.get(logo_id)
+            }
+        else:
+            if is_on_showcase:
+                pos_catalog[k]["stock"] = 1.0
+                
     if len(b_data) < 100:
+        break
+    # Ограничиваемся первыми 200 последними созданными букетами для максимальной скорости
+    if page >= 2:
         break
     page += 1
 
-print(f"Активных букетов на витрине Posiflora: {len(pos_catalog)}")
+active_bouquets = [v["title"] for v in pos_catalog.values() if v["stock"] > 0]
+print(f"Активных витринных букетов Posiflora: {len(active_bouquets)}")
 
-# Загружаем номенклатуру (срезанные цветы, зелень)
+# Номенклатура цветов
 page = 1
 while True:
     r = pos_session.get(f"{POSIFLORA_URL}/inventory-items?page[size]=100&page[number]={page}", timeout=25)
@@ -202,7 +214,6 @@ for key, item_data in pos_catalog.items():
     target_stock = item_data["stock"]
     cur_stock = stocks_by_store.get((matched["id"], TARGET_STORE_ID), 0.0)
     
-    # Если на складе меньше, чем на витрине — оприходуем разницу
     if cur_stock < target_stock and target_stock > 0:
         enter_positions.append({
             "quantity": round(target_stock - cur_stock, 2), 
@@ -210,7 +221,7 @@ for key, item_data in pos_catalog.items():
             "assortment": {"meta": {"href": matched["href"], "type": "product", "mediaType": "application/json"}}
         })
 
-# Проверяем товары на складе, которых больше нет на витрине
+# Списание лишних/проданных букетов
 for (a_id, s_id), cur_stock in stocks_by_store.items():
     if s_id != TARGET_STORE_ID or cur_stock <= 0: 
         continue
