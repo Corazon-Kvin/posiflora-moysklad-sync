@@ -1,30 +1,34 @@
 import os
 import requests
 import time
+from dotenv import load_dotenv
 
-# --- НАСТРОЙКИ POSIFLORA ---
+load_dotenv()
+
 POSIFLORA_USER = os.getenv("POSIFLORA_USER", "cvetistroginorf")
 POSIFLORA_PASS = os.getenv("POSIFLORA_PASS", "19478893")
 POSIFLORA_URL = "https://lakmaflowers.posiflora.com/api/v1"
-STORE_ID = "cde3de25-51e3-4193-a164-84cdebd01e94"
 
-# --- НАСТРОЙКИ МОЙСКЛАД ---
 MOYSKLAD_TOKEN = os.getenv("MOYSKLAD_TOKEN", "d528d07b79305bf9859c706da2cbd62c7777ecf0")
 MOYSKLAD_URL = "https://api.moysklad.ru/api/remap/1.2"
 
+# Папка «Цветы лакма» и склад «Склад Лакма Цветы»
+TARGET_FOLDER_ID = "d1bd2ba3-af7a-11f1-0a80-02f300382021"
 TARGET_STORE_ID = "fc24f096-af79-11f1-0a80-0c0a0039483e"
-STORE_HREF = f"https://api.moysklad.ru/api/remap/1.2/entity/store/{TARGET_STORE_ID}"
-ORG_HREF = "https://api.moysklad.ru/api/remap/1.2/entity/organization/b34f89b3-c981-11ee-0a80-07770038ef19"
+ORG_ID = "b34f89b3-c981-11ee-0a80-07770038ef19"
+
+FOLDER_HREF = f"{MOYSKLAD_URL}/entity/productfolder/{TARGET_FOLDER_ID}"
+STORE_HREF = f"{MOYSKLAD_URL}/entity/store/{TARGET_STORE_ID}"
+ORG_HREF = f"{MOYSKLAD_URL}/entity/organization/{ORG_ID}"
 
 MAX_STOCK_FLOWERS = 35
 
-# --- 1. АВТОРИЗАЦИЯ ---
 pos_session = requests.Session()
 pos_session.trust_env = False
 pos_session.headers.update({
     "Content-Type": "application/vnd.api+json",
     "Accept": "application/vnd.api+json",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "User-Agent": "Mozilla/5.0",
 })
 
 resp = pos_session.post(f"{POSIFLORA_URL}/sessions", json={
@@ -40,9 +44,9 @@ ms_session.headers.update({
     "Content-Type": "application/json"
 })
 
-# --- 2. СБОР СУЩЕСТВУЮЩИХ ТОВАРОВ ИЗ МОЙСКЛАД ---
-print("1. Загрузка справочника товаров из МоегоСклада...")
+print("1. Получение товаров из МойСклад...")
 ms_goods_by_name = {}
+ms_goods_by_id = {}
 offset = 0
 while True:
     res = ms_session.get(f"{MOYSKLAD_URL}/entity/product?limit=100&offset={offset}", timeout=30)
@@ -54,24 +58,25 @@ while True:
     if not rows:
         break
     for item in rows:
+        p_id = item["id"]
         name_clean = item["name"].strip().lower()
-        ms_goods_by_name[name_clean] = {
-            "id": item["id"],
+        info = {
+            "id": p_id,
             "name": item["name"].strip(),
             "href": item["meta"]["href"],
-            "price": item.get("salePrices", [{}])[0].get("value", 0)
+            "price": item.get("salePrices", [{}])[0].get("value", 0) if item.get("salePrices") else 0
         }
+        ms_goods_by_name[name_clean] = info
+        ms_goods_by_id[p_id] = info
     offset += len(rows)
     if len(rows) < 100:
         break
+print(f"Всего товаров в МоемСкладе: {len(ms_goods_by_name)}")
 
-print(f"В МоемСкладе найдено товаров: {len(ms_goods_by_name)}")
+print("\n2. Сбор каталога из Posiflora...")
+pos_catalog = {}
 
-# --- 3. СБОР ВСЕХ ТОВАРОВ ИЗ POSIFLORA (ПОСТОЯННЫЕ + ВИТРИНА) ---
-print("\n2. Сбор каталога и номенклатуры из Posiflora...")
-pos_catalog = {}  # {name_clean: {"title": ..., "price": ..., "stock": ..., "image_url": ...}}
-
-# А. Букеты витрины
+# Букеты витрины (строго с ценой > 0 и активные)
 page = 1
 while True:
     r = pos_session.get(f"{POSIFLORA_URL}/bouquets?page[size]=100&page[number]={page}&include=logo", timeout=25)
@@ -81,8 +86,6 @@ while True:
     b_data = res.get("data", [])
     if not b_data:
         break
-    
-    # Сбор ссылок на фото из included
     logos = {str(inc["id"]): inc.get("attributes", {}).get("file", {}).get("url") 
              for inc in res.get("included", []) if inc.get("type") == "files"}
 
@@ -90,29 +93,27 @@ while True:
         attrs = b.get("attributes", {})
         title = attrs.get("title", "").strip()
         status = attrs.get("status", "")
-        price = float(attrs.get("price", 0) or 0) * 100  # МойСклад хранит цены в копейках
+        price = float(attrs.get("price", 0) or 0) * 100
         
+        # Пропускаем товары без цены или без названия
+        if not title or price <= 0:
+            continue
+
         logo_rel = b.get("relationships", {}).get("logo", {}).get("data")
         logo_id = str(logo_rel.get("id")) if logo_rel else None
-        img_url = logos.get(logo_id)
 
-        stock = 1.0 if status in ("on_window", "created", "active") else 0.0
-
-        if title:
-            pos_catalog[title.lower()] = {
-                "title": title,
-                "price": price,
-                "stock": stock,
-                "image_url": img_url
-            }
+        pos_catalog[title.lower()] = {
+            "title": title,
+            "price": price,
+            "stock": 1.0 if status in ("on_window", "created", "active") else 0.0,
+            "image_url": logos.get(logo_id)
+        }
     if len(b_data) < 100:
         break
     page += 1
-print(f"-> Букетов витрины получено: {len(pos_catalog)}")
 
-# Б. Основная номенклатура (срезанные цветы, игрушки, декор, подарки)
+# Номенклатура цветов
 page = 1
-items_added = 0
 while True:
     r = pos_session.get(f"{POSIFLORA_URL}/inventory-items?page[size]=100&page[number]={page}", timeout=25)
     if r.status_code != 200:
@@ -129,53 +130,51 @@ while True:
         qty = float(raw_qty)
         price = float(attrs.get("price", 0) or attrs.get("salePrice", 0) or 0) * 100
 
-        capped_qty = min(qty, float(MAX_STOCK_FLOWERS)) if qty > 0 else 0.0
+        # Только если есть цена и ненулевой остаток
+        if price <= 0 and qty <= 0:
+            continue
 
-        key = title.lower()
-        if key not in pos_catalog:
-            pos_catalog[key] = {
-                "title": title,
-                "price": price,
-                "stock": capped_qty,
-                "image_url": None
-            }
-            items_added += 1
-        else:
-            if qty > 0:
-                pos_catalog[key]["stock"] = capped_qty
+        capped_qty = min(qty, float(MAX_STOCK_FLOWERS)) if qty > 0 else 0.0
+        k = title.lower()
+        if k not in pos_catalog:
+            pos_catalog[k] = {"title": title, "price": price, "stock": capped_qty, "image_url": None}
+        elif qty > 0:
+            pos_catalog[k]["stock"] = capped_qty
     if len(i_data) < 100:
         break
     page += 1
-print(f"-> Постоянных позиций (номенклатура) добавлено: {items_added}")
-print(f"Итого уникальных товаров в Posiflora: {len(pos_catalog)}")
 
-# --- 4. АВТОМАТИЧЕСКОЕ СОЗДАНИЕ НОВЫХ ТОВАРОВ В МОЙСКЛАД ---
-print("\n3. Проверка на новинки и создание недостающих товаров в МоемСкладе...")
+print(f"Актуальных позиций из Posiflora: {len(pos_catalog)}")
+
+print("\n3. Создание недостающих товаров в папке «Цветы лакма»...")
 created_count = 0
 for key, item_data in pos_catalog.items():
     if key not in ms_goods_by_name:
-        # Создаем товар
         payload = {
             "name": item_data["title"],
+            "productFolder": {
+                "meta": {"href": FOLDER_HREF, "type": "productfolder", "mediaType": "application/json"}
+            },
             "salePrices": [{"value": item_data["price"], "priceType": {"name": "Цена продажи"}}] if item_data["price"] > 0 else []
         }
         res_create = ms_session.post(f"{MOYSKLAD_URL}/entity/product", json=payload, timeout=20)
         if res_create.status_code in (200, 201):
             created_prod = res_create.json()
-            ms_goods_by_name[key] = {
+            p_info = {
                 "id": created_prod["id"],
                 "name": created_prod["name"],
                 "href": created_prod["meta"]["href"],
                 "price": item_data["price"]
             }
+            ms_goods_by_name[key] = p_info
+            ms_goods_by_id[created_prod["id"]] = p_info
             created_count += 1
-            print(f"  [+] Создан новый товар: {item_data['title']}")
+            print(f"  [+] Создан в папку «Цветы лакма»: {item_data['title']}")
 
-            # Если есть фото — прикрепляем к карточке
             if item_data["image_url"]:
                 try:
-                    img_data = requests.get(item_data["image_url"], timeout=15).content
                     import base64
+                    img_data = requests.get(item_data["image_url"], timeout=15).content
                     b64_img = base64.b64encode(img_data).decode("utf-8")
                     ms_session.post(
                         f"{MOYSKLAD_URL}/entity/product/{created_prod['id']}/images",
@@ -187,10 +186,9 @@ for key, item_data in pos_catalog.items():
         elif res_create.status_code == 429:
             time.sleep(2.0)
 
-print(f"Создано новых товаров в МойСклад: {created_count}")
+print(f"Создано новых товаров: {created_count}")
 
-# --- 5. СИНХРОНИЗАЦИЯ ОСТАТКОВ ---
-print("\n4. Синхронизация остатков по складу «Склад Лакма Цветы»...")
+print("\n4. Корректировка остатков на складе «Склад Лакма Цветы»...")
 stocks_by_store = {}
 r_stocks = ms_session.get(f"{MOYSKLAD_URL}/report/stock/bystore/current", timeout=45)
 if r_stocks.status_code == 200:
@@ -204,7 +202,6 @@ if r_stocks.status_code == 200:
 enter_positions = []
 loss_positions_by_store = {}
 
-# Оприходование
 for key, item_data in pos_catalog.items():
     target_stock = item_data["stock"]
     if target_stock <= 0:
@@ -212,7 +209,6 @@ for key, item_data in pos_catalog.items():
     matched = ms_goods_by_name.get(key)
     if not matched:
         continue
-    
     cur_stock = stocks_by_store.get((matched["id"], TARGET_STORE_ID), 0.0)
     if cur_stock < target_stock:
         diff = round(target_stock - cur_stock, 2)
@@ -223,15 +219,13 @@ for key, item_data in pos_catalog.items():
                 "assortment": {"meta": {"href": matched["href"], "type": "product", "mediaType": "application/json"}}
             })
 
-# Списание излишков
 for (a_id, s_id), cur_store_stock in stocks_by_store.items():
     if cur_store_stock <= 0:
         continue
-    # Ищем товар
-    matched = next((g for g in ms_goods_by_name.values() if g["id"] == a_id), None)
-    if not matched:
+    good = ms_goods_by_id.get(a_id)
+    if not good:
         continue
-    target = pos_catalog.get(matched["name"].lower(), {}).get("stock", 0.0) if s_id == TARGET_STORE_ID else 0.0
+    target = pos_catalog.get(good["name"].lower(), {}).get("stock", 0.0) if s_id == TARGET_STORE_ID else 0.0
     if cur_store_stock > target:
         diff = round(cur_store_stock - target, 2)
         if diff > 0:
@@ -239,7 +233,7 @@ for (a_id, s_id), cur_store_stock in stocks_by_store.items():
                 loss_positions_by_store[s_id] = []
             loss_positions_by_store[s_id].append({
                 "quantity": diff,
-                "assortment": {"meta": {"href": matched["href"], "type": "product", "mediaType": "application/json"}}
+                "assortment": {"meta": {"href": good["href"], "type": "product", "mediaType": "application/json"}}
             })
 
 if enter_positions:
@@ -249,13 +243,13 @@ if enter_positions:
             "organization": {"meta": {"href": ORG_HREF, "type": "organization", "mediaType": "application/json"}},
             "store": {"meta": {"href": STORE_HREF, "type": "store", "mediaType": "application/json"}},
             "applicable": True,
-            "description": "Синхронизация фактических остатков",
+            "description": "Синхронизация фактических остатков (Склад Цветы)",
             "positions": chunk
         }, timeout=60)
-    print(f"  [+] Оприходовано позиций: {len(enter_positions)}")
+    print(f"  [+] Оприходовано: {len(enter_positions)} поз. на Склад Лакма Цветы")
 
 for s_id, batch in loss_positions_by_store.items():
-    s_href = f"https://api.moysklad.ru/api/remap/1.2/entity/store/{s_id}"
+    s_href = f"{MOYSKLAD_URL}/entity/store/{s_id}"
     for i in range(0, len(batch), 1000):
         chunk = batch[i:i + 1000]
         ms_session.post(f"{MOYSKLAD_URL}/entity/loss", json={
@@ -265,6 +259,6 @@ for s_id, batch in loss_positions_by_store.items():
             "description": "Списание излишков под витрину",
             "positions": chunk
         }, timeout=60)
-    print(f"  [-] Списано излишков ({len(batch)} поз.) для склада {s_id}")
+    print(f"  [-] Списано: {len(batch)} поз. со склада {s_id}")
 
-print("\nСинхронизация полностью завершена. Все новинки созданы, остатки откалиброваны.")
+print("\nСинхронизация завершена.")
