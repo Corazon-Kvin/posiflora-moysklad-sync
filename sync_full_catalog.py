@@ -29,7 +29,11 @@ ORG_HREF = f"{MOYSKLAD_URL}/entity/organization/{ORG_ID}"
 MAX_STOCK_FLOWERS = 35
 
 def norm_name(s):
-    return re.sub(r'\s+', ' ', str(s or '')).strip().lower()
+    # Приводим к нижнему регистру, убираем спецсимволы и слово 'букет' для надежного сопоставления
+    clean = re.sub(r'[\(\)\-\_\,\.\"]', ' ', str(s or '')).strip().lower()
+    clean = re.sub(r'^букет\s+', '', clean)
+    clean = re.sub(r'\s+', ' ', clean)
+    return clean.strip()
 
 # --- Сессии ---
 pos_session = requests.Session()
@@ -60,7 +64,9 @@ while True:
     rows = res.json().get("rows", [])
     if not rows: break
     for item in rows:
-        clean = norm_name(item.get("name"))
+        raw_name = str(item.get("name", "")).strip().lower()
+        clean = norm_name(raw_name)
+
         if not default_price_meta and item.get("salePrices"):
             pt_meta = item["salePrices"][0].get("priceType", {}).get("meta")
             if pt_meta:
@@ -72,11 +78,14 @@ while True:
             "href": item["meta"]["href"],
             "price": item.get("salePrices", [{}])[0].get("value", 0) if item.get("salePrices") else 0
         }
+        # Сохраняем в индекс оба варианта для поиска
+        ms_goods_by_name[raw_name] = info
         ms_goods_by_name[clean] = info
         ms_goods_by_id[item["id"]] = info
+
     offset += len(rows)
     if len(rows) < 100: break
-print(f"Всего позиций в базе МоегоСклада: {len(ms_goods_by_name)}")
+print(f"Всего позиций в базе МоегоСклада: {len(ms_goods_by_id)}")
 
 # --- 2. Сбор каталога Posiflora ---
 print("\n2. Сбор каталога Posiflora...")
@@ -104,9 +113,14 @@ while True:
         price = float(raw_price) * 100
         
         if not title: continue
-        k = norm_name(title)
-        if price <= 0 and k in ms_goods_by_name:
-            price = ms_goods_by_name[k]["price"]
+        k_clean = norm_name(title)
+        k_raw = title.lower()
+
+        # Ищем существующую цену в МС, если в Posiflora 0
+        if price <= 0:
+            match_ms = ms_goods_by_name.get(k_raw) or ms_goods_by_name.get(k_clean)
+            if match_ms:
+                price = match_ms["price"]
 
         img_urls = []
         logo_rel = b.get("relationships", {}).get("logo", {}).get("data")
@@ -121,8 +135,8 @@ while True:
                 if fid in files_map and files_map[fid] not in img_urls:
                     img_urls.append(files_map[fid])
 
-        if k not in pos_catalog:
-            pos_catalog[k] = {
+        if k_clean not in pos_catalog:
+            pos_catalog[k_clean] = {
                 "title": title, 
                 "price": price, 
                 "stock": 1.0 if is_on_showcase else 0.0, 
@@ -132,7 +146,7 @@ while True:
             }
         else:
             if is_on_showcase:
-                pos_catalog[k]["stock"] = 1.0
+                pos_catalog[k_clean]["stock"] = 1.0
                 
     if len(b_data) < 100: break
     page += 1
@@ -165,12 +179,15 @@ while True:
         if not title or status == "off":
             continue
         
-        k = norm_name(title)
+        k_clean = norm_name(title)
+        k_raw = title.lower()
         raw_price = attrs.get("minPrice") or attrs.get("maxPrice") or attrs.get("price") or 0
         price = float(raw_price) * 100
 
-        if price <= 0 and k in ms_goods_by_name:
-            price = ms_goods_by_name[k]["price"]
+        if price <= 0:
+            match_ms = ms_goods_by_name.get(k_raw) or ms_goods_by_name.get(k_clean)
+            if match_ms:
+                price = match_ms["price"]
 
         img_urls = []
         spec_imgs = spec.get("relationships", {}).get("images", {}).get("data", [])
@@ -180,9 +197,9 @@ while True:
                 if sid in images_map and images_map[sid] not in img_urls:
                     img_urls.append(images_map[sid])
 
-        # Авторские букеты всегда в наличии (остаток 5)
-        if k not in pos_catalog:
-            pos_catalog[k] = {
+        # Авторские букеты поддерживаем доступными (остаток 5)
+        if k_clean not in pos_catalog:
+            pos_catalog[k_clean] = {
                 "title": title,
                 "price": price,
                 "stock": 5.0,
@@ -197,7 +214,7 @@ while True:
 auth_bouquets = [v["title"] for v in pos_catalog.values() if v.get("folder_id") == FOLDER_AUTH_ID]
 print(f"Всего авторских букетов (рецептов): {len(auth_bouquets)}")
 
-# 2.3 Номенклатура цветов и складские остатки через /catalog
+# 2.3 Номенклатура цветов и остатки через /catalog
 print("Сбор остатков цветов через /catalog...")
 page = 1
 while True:
@@ -234,7 +251,8 @@ while True:
         attrs = item.get("attributes", {})
         title = attrs.get("title", "").strip()
         if not title: continue
-        k = norm_name(title)
+        k_clean = norm_name(title)
+        k_raw = title.lower()
 
         bal_rel = item.get("relationships", {}).get("balances", {}).get("data", [])
         prices_rel = item.get("relationships", {}).get("prices", {}).get("data", [])
@@ -265,25 +283,27 @@ while True:
         if item_price <= 0:
             raw_p = attrs.get("priceMax") or attrs.get("salePrice") or attrs.get("price") or 0
             item_price = float(raw_p) * 100
-        if item_price <= 0 and k in ms_goods_by_name:
-            item_price = ms_goods_by_name[k]["price"]
+        if item_price <= 0:
+            match_ms = ms_goods_by_name.get(k_raw) or ms_goods_by_name.get(k_clean)
+            if match_ms:
+                item_price = match_ms["price"]
 
         capped_qty = min(item_stock, float(MAX_STOCK_FLOWERS)) if item_stock > 0 else 0.0
 
-        if k not in pos_catalog:
-            pos_catalog[k] = {
+        if k_clean not in pos_catalog:
+            pos_catalog[k_clean] = {
                 "title": title, 
                 "price": item_price, 
                 "stock": capped_qty, 
                 "image_urls": [], 
                 "folder_id": FOLDER_FLOWERS_ID,
-                "create_if_missing": False  # Цветы не дублируем, только обновляем остатки
+                "create_if_missing": False  # Цветы не плодим дублями, только правим остатки
             }
         else:
             if capped_qty > 0:
-                pos_catalog[k]["stock"] = capped_qty
-            if item_price > 0 and pos_catalog[k]["price"] <= 0:
-                pos_catalog[k]["price"] = item_price
+                pos_catalog[k_clean]["stock"] = capped_qty
+            if item_price > 0 and pos_catalog[k_clean]["price"] <= 0:
+                pos_catalog[k_clean]["price"] = item_price
 
     if len(items) < 100: break
     page += 1
@@ -297,7 +317,9 @@ for key, item_data in pos_catalog.items():
     if not item_data.get("create_if_missing"):
         continue
 
-    if key not in ms_goods_by_name:
+    # Проверяем наличие по очищенному и по исходному имени
+    raw_key = item_data["title"].lower()
+    if key not in ms_goods_by_name and raw_key not in ms_goods_by_name:
         sale_prices = []
         if item_data["price"] > 0:
             if default_price_meta:
@@ -317,13 +339,15 @@ for key, item_data in pos_catalog.items():
         if res_create.status_code in (200, 201):
             created = res_create.json()
             created_id = created["id"]
-            ms_goods_by_name[key] = {"id": created_id, "name": created["name"], "href": created["meta"]["href"], "price": item_data["price"]}
-            ms_goods_by_id[created_id] = ms_goods_by_name[key]
+            entry = {"id": created_id, "name": created["name"], "href": created["meta"]["href"], "price": item_data["price"]}
+            ms_goods_by_name[key] = entry
+            ms_goods_by_name[raw_key] = entry
+            ms_goods_by_id[created_id] = entry
             created_count += 1
             folder_label = "Витрина Tilda" if item_data['folder_id'] == FOLDER_VITRINA_ID else "Авторские букеты"
             print(f"  [+] Создан в [{folder_label}]: {item_data['title']} ({item_data['price']/100:.0f} руб.)")
             
-            # Загрузка всех фотографий галереи
+            # Загрузка галереи фото
             for idx, img_url in enumerate(item_data.get("image_urls", [])):
                 try:
                     img_data = requests.get(img_url, timeout=15).content
@@ -353,7 +377,8 @@ enter_positions = []
 loss_positions = []
 
 for key, item_data in pos_catalog.items():
-    matched = ms_goods_by_name.get(key)
+    raw_key = item_data["title"].lower()
+    matched = ms_goods_by_name.get(key) or ms_goods_by_name.get(raw_key)
     if not matched: continue
     target_stock = item_data["stock"]
     cur_stock = stocks_by_store.get((matched["id"], TARGET_STORE_ID), 0.0)
@@ -369,7 +394,11 @@ for (a_id, s_id), cur_stock in stocks_by_store.items():
     if s_id != TARGET_STORE_ID or cur_stock <= 0: continue
     good = ms_goods_by_id.get(a_id)
     if not good: continue
-    target = pos_catalog.get(norm_name(good.get("name", "")), {}).get("stock", 0.0)
+    good_name = good.get("name", "")
+    target = pos_catalog.get(norm_name(good_name), {}).get("stock")
+    if target is None:
+        target = pos_catalog.get(good_name.lower(), {}).get("stock", 0.0)
+        
     if cur_stock > target:
         loss_positions.append({
             "quantity": round(cur_stock - target, 2), 
