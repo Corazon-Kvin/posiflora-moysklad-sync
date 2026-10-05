@@ -15,7 +15,7 @@ POSIFLORA_URL = "https://lakmaflowers.posiflora.com/api/v1"
 MOYSKLAD_TOKEN = os.getenv("MOYSKLAD_TOKEN", "d528d07b79305bf9859c706da2cbd62c7777ecf0")
 MOYSKLAD_URL = "https://api.moysklad.ru/api/remap/1.2"
 
-# Папки в МойСклад
+# Целевые папки в МоемСкладе
 FOLDER_VITRINA_ID = "57cbfb03-af7b-11f1-0a80-00ba00393e19"  # Витрина Tilda
 FOLDER_AUTH_ID    = "b5104917-b72b-11f1-0a80-00cf000d73af"  # Авторские букеты (Рецепты)
 FOLDER_FLOWERS_ID = "a69d7682-b72b-11f1-0a80-0c1e000dacd4"  # Цветы
@@ -31,8 +31,7 @@ MAX_STOCK_FLOWERS = 35
 def norm_name(s):
     clean = re.sub(r'[\(\)\-\_\,\.\"]', ' ', str(s or '')).strip().lower()
     clean = re.sub(r'^букет\s+', '', clean)
-    clean = re.sub(r'\s+', ' ', clean)
-    return clean.strip()
+    return re.sub(r'\s+', ' ', clean).strip()
 
 # --- Сессии ---
 pos_session = requests.Session()
@@ -54,7 +53,7 @@ default_price_meta = None
 offset = 0
 
 while True:
-    res = ms_session.get(f"{MOYSKLAD_URL}/entity/assortment?limit=100&offset={offset}", timeout=30)
+    res = ms_session.get(f"{MOYSKLAD_URL}/entity/assortment?limit=100&offset={offset}&expand=images", timeout=30)
     if res.status_code == 429:
         time.sleep(2.0)
         continue
@@ -72,6 +71,8 @@ while True:
             "id": item["id"],
             "name": item.get("name", "").strip(),
             "href": item["meta"]["href"],
+            "has_images": len(item.get("images", {}).get("rows", [])) > 0,
+            "folder_href": item.get("productFolder", {}).get("meta", {}).get("href", ""),
             "price": item.get("salePrices", [{}])[0].get("value", 0) if item.get("salePrices") else 0
         }
         ms_goods_by_name[raw_name] = info
@@ -104,15 +105,13 @@ while True:
         completed_at = attrs.get("completedAt")
         
         is_on_showcase = (status == "demonstrated" and not completed_at)
-        
-        # !!! КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Игнорируем архивные сборки, берем только активную витрину !!!
         if not is_on_showcase:
             continue
             
         raw_price = attrs.get("saleAmount") or attrs.get("salePrice") or attrs.get("priceMax") or attrs.get("amount") or 0
         price = float(raw_price) * 100
-        
         if not title: continue
+
         k_clean = norm_name(title)
         k_raw = title.lower()
 
@@ -192,7 +191,7 @@ while True:
             pos_catalog[k_clean] = {
                 "title": title,
                 "price": price,
-                "stock": 5.0, # Авторские букеты всегда в наличии
+                "stock": 5.0, # Всегда в наличии
                 "image_urls": img_urls,
                 "folder_id": FOLDER_AUTH_ID,
                 "create_if_missing": True
@@ -286,15 +285,15 @@ while True:
 
 print(f"Всего позиций в сводном каталоге: {len(pos_catalog)}")
 
-# --- 3. Создание новинок ---
-print("\n3. Создание недостающих товаров в нужные папки...")
+# --- 3. Создание новинок и догрузка отсутствующих фото ---
+print("\n3. Создание недостающих товаров и проверка фото...")
 created_count = 0
 for key, item_data in pos_catalog.items():
-    if not item_data.get("create_if_missing"):
-        continue
-
     raw_key = item_data["title"].lower()
-    if key not in ms_goods_by_name and raw_key not in ms_goods_by_name:
+    matched = ms_goods_by_name.get(key) or ms_goods_by_name.get(raw_key)
+
+    # 3.1 Создание карточки, если её нет
+    if not matched and item_data.get("create_if_missing"):
         sale_prices = []
         if item_data["price"] > 0:
             if default_price_meta:
@@ -314,28 +313,29 @@ for key, item_data in pos_catalog.items():
         if res_create.status_code in (200, 201):
             created = res_create.json()
             created_id = created["id"]
-            entry = {"id": created_id, "name": created["name"], "href": created["meta"]["href"], "price": item_data["price"]}
-            ms_goods_by_name[key] = entry
-            ms_goods_by_name[raw_key] = entry
-            ms_goods_by_id[created_id] = entry
+            matched = {"id": created_id, "name": created["name"], "href": created["meta"]["href"], "has_images": False, "price": item_data["price"]}
+            ms_goods_by_name[key] = matched
+            ms_goods_by_name[raw_key] = matched
+            ms_goods_by_id[created_id] = matched
             created_count += 1
             folder_label = "Витрина Tilda" if item_data['folder_id'] == FOLDER_VITRINA_ID else "Авторские букеты"
             print(f"  [+] Создан в [{folder_label}]: {item_data['title']} ({item_data['price']/100:.0f} руб.)")
-            
-            for idx, img_url in enumerate(item_data.get("image_urls", [])):
-                try:
-                    img_data = requests.get(img_url, timeout=15).content
-                    ms_session.post(
-                        f"{MOYSKLAD_URL}/entity/product/{created_id}/images", 
-                        json={"filename": f"photo_{idx}.jpg", "content": base64.b64encode(img_data).decode("utf-8")}, 
-                        timeout=15
-                    )
-                except Exception:
-                    pass
         elif res_create.status_code == 429:
             time.sleep(2.0)
-        else:
-            print(f"  [!] Ошибка создания '{item_data['title']}': {res_create.status_code} - {res_create.text}")
+
+    # 3.2 Докачиваем фото, если у товара в МоемСкладе их до сих пор нет
+    if matched and not matched.get("has_images") and item_data.get("image_urls"):
+        for idx, img_url in enumerate(item_data["image_urls"]):
+            try:
+                img_data = requests.get(img_url, timeout=15).content
+                ms_session.post(
+                    f"{MOYSKLAD_URL}/entity/product/{matched['id']}/images", 
+                    json={"filename": f"photo_{idx}.jpg", "content": base64.b64encode(img_data).decode("utf-8")}, 
+                    timeout=15
+                )
+                matched["has_images"] = True
+            except Exception:
+                pass
 
 print(f"Создано новинок: {created_count}")
 
