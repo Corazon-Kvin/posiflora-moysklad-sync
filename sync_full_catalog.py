@@ -42,7 +42,9 @@ ms_session.headers.update({"Authorization": f"Bearer {MOYSKLAD_TOKEN.strip()}", 
 print("1. Получение товаров из МойСклад...")
 ms_goods_by_name = {}
 ms_goods_by_id = {}
+default_price_meta = None
 offset = 0
+
 while True:
     res = ms_session.get(f"{MOYSKLAD_URL}/entity/product?limit=100&offset={offset}", timeout=30)
     if res.status_code == 429:
@@ -52,6 +54,13 @@ while True:
     if not rows: break
     for item in rows:
         clean_name = item["name"].strip().lower()
+        
+        # Захватываем системный meta-объект цены для создания новинок
+        if not default_price_meta and item.get("salePrices"):
+            pt_meta = item["salePrices"][0].get("priceType", {}).get("meta")
+            if pt_meta:
+                default_price_meta = pt_meta
+
         info = {
             "id": item["id"],
             "name": item["name"].strip(),
@@ -68,16 +77,14 @@ print(f"Всего товаров в базе МоегоСклада: {len(ms_go
 print("\n2. Сбор каталога Posiflora...")
 pos_catalog = {}
 
-# 2.1 Актуальная витрина букетов (все страницы, все картинки)
+# 2.1 Актуальная витрина букетов
 page = 1
 while True:
     r = pos_session.get(f"{POSIFLORA_URL}/bouquets?sort=-createdAt&page[size]=100&page[number]={page}&include=images,logo", timeout=25)
-    if r.status_code != 200:
-        break
+    if r.status_code != 200: break
     res_data = r.json()
     b_data = res_data.get("data", [])
-    if not b_data: 
-        break
+    if not b_data: break
     
     files_map = {str(inc["id"]): inc.get("attributes", {}).get("file", {}).get("url") for inc in res_data.get("included", []) if inc.get("type") == "files"}
     
@@ -88,17 +95,13 @@ while True:
         completed_at = attrs.get("completedAt")
         
         is_on_showcase = (status == "demonstrated" and not completed_at)
-        raw_price = attrs.get("saleAmount") or attrs.get("amount") or attrs.get("trueSaleAmount") or attrs.get("price") or 0
+        raw_price = attrs.get("saleAmount") or attrs.get("salePrice") or attrs.get("priceMax") or attrs.get("amount") or attrs.get("price") or 0
         price = float(raw_price) * 100
         
-        if not title:
-            continue
+        if not title: continue
         if price <= 0 and title.lower() in ms_goods_by_name:
             price = ms_goods_by_name[title.lower()]["price"]
-        if price <= 0:
-            continue
 
-        # Собираем все картинки (логотип + дополнительные фото)
         img_urls = []
         logo_rel = b.get("relationships", {}).get("logo", {}).get("data")
         images_rel = b.get("relationships", {}).get("images", {}).get("data", [])
@@ -114,24 +117,15 @@ while True:
 
         k = title.lower()
         if k not in pos_catalog:
-            pos_catalog[k] = {
-                "title": title, 
-                "price": price, 
-                "stock": 1.0 if is_on_showcase else 0.0,
-                "image_urls": img_urls
-            }
+            pos_catalog[k] = {"title": title, "price": price, "stock": 1.0 if is_on_showcase else 0.0, "image_urls": img_urls}
         else:
             if is_on_showcase:
                 pos_catalog[k]["stock"] = 1.0
                 
-    if len(b_data) < 100:
-        break
+    if len(b_data) < 100: break
     page += 1
 
-active_bouquets = [v["title"] for v in pos_catalog.values() if v["stock"] > 0]
-print(f"Активных витринных букетов Posiflora: {len(active_bouquets)}")
-
-# 2.2 Номенклатура цветов и точные складские остатки через /catalog
+# 2.2 Номенклатура цветов и остатки через /catalog
 print("Сбор остатков цветов через /catalog...")
 page = 1
 while True:
@@ -144,12 +138,10 @@ while True:
         "concealment": "false"
     }
     r = pos_session.get(f"{POSIFLORA_URL}/catalog", params=params, timeout=30)
-    if r.status_code != 200:
-        break
+    if r.status_code != 200: break
     res_json = r.json()
     items = res_json.get("data", [])
-    if not items:
-        break
+    if not items: break
 
     balances_map = {}
     prices_map = {}
@@ -169,18 +161,15 @@ while True:
     for item in items:
         attrs = item.get("attributes", {})
         title = attrs.get("title", "").strip()
-        if not title:
-            continue
+        if not title: continue
         k = title.lower()
 
-        # Правильная связка остатков напрямую из relationships.balances
         bal_rel = item.get("relationships", {}).get("balances", {}).get("data", [])
         prices_rel = item.get("relationships", {}).get("prices", {}).get("data", [])
         
         item_stock = 0.0
         item_price = 0.0
 
-        # Считаем остатки
         if isinstance(bal_rel, list):
             for b in bal_rel:
                 bid = str(b.get("id", ""))
@@ -191,7 +180,6 @@ while True:
             if bid in balances_map:
                 item_stock += balances_map[bid]
 
-        # Ищем цену
         if isinstance(prices_rel, list):
             for p in prices_rel:
                 pid = str(p.get("id", ""))
@@ -218,36 +206,36 @@ while True:
             if item_price > 0 and pos_catalog[k]["price"] <= 0:
                 pos_catalog[k]["price"] = item_price
 
-    if len(items) < 100:
-        break
+    if len(items) < 100: break
     page += 1
 
-flowers_in_stock = [v["title"] for v in pos_catalog.values() if v["stock"] > 0 and "букет" not in v["title"].lower()]
-print(f"Цветов с ненулевым остатком: {len(flowers_in_stock)}")
 print(f"Всего позиций в сводном каталоге: {len(pos_catalog)}")
 
-# --- 3. Создание новинок с фото в папке «Цветы лакма» ---
+# --- 3. Создание новинок с фото ---
 print("\n3. Создание недостающих товаров...")
 created_count = 0
 for key, item_data in pos_catalog.items():
     if key not in ms_goods_by_name:
+        sale_prices = []
+        if item_data["price"] > 0:
+            if default_price_meta:
+                sale_prices.append({"value": item_data["price"], "priceType": {"meta": default_price_meta}})
+            else:
+                sale_prices.append({"value": item_data["price"]})
+
         payload = {
             "name": item_data["title"],
             "productFolder": {"meta": {"href": FOLDER_HREF, "type": "productfolder", "mediaType": "application/json"}},
-            "salePrices": [{"value": item_data["price"], "priceType": {"name": "Цена продажи"}}] if item_data["price"] > 0 else []
+            "salePrices": sale_prices
         }
+        
         res_create = ms_session.post(f"{MOYSKLAD_URL}/entity/product", json=payload, timeout=20)
+        
         if res_create.status_code in (200, 201):
             created = res_create.json()
             created_id = created["id"]
-            info = {
-                "id": created_id, 
-                "name": created["name"],
-                "href": created["meta"]["href"], 
-                "price": item_data["price"]
-            }
-            ms_goods_by_name[key] = info
-            ms_goods_by_id[created_id] = info
+            ms_goods_by_name[key] = {"id": created_id, "name": created["name"], "href": created["meta"]["href"], "price": item_data["price"]}
+            ms_goods_by_id[created_id] = ms_goods_by_name[key]
             created_count += 1
             print(f"  [+] Создан: {item_data['title']}")
             
@@ -264,9 +252,12 @@ for key, item_data in pos_catalog.items():
                     pass
         elif res_create.status_code == 429:
             time.sleep(2.0)
+        else:
+            print(f"  [!] Ошибка создания '{item_data['title']}': {res_create.status_code} - {res_create.text}")
+
 print(f"Создано новинок: {created_count}")
 
-# --- 4. Выравнивание остатков на Склад Лакма Цветы ---
+# --- 4. Выравнивание остатков ---
 print("\n4. Корректировка остатков...")
 stocks_by_store = {}
 r_stocks = ms_session.get(f"{MOYSKLAD_URL}/report/stock/bystore/current", timeout=45).json()
@@ -279,51 +270,29 @@ loss_positions = []
 
 for key, item_data in pos_catalog.items():
     matched = ms_goods_by_name.get(key)
-    if not matched: 
-        continue
+    if not matched: continue
     target_stock = item_data["stock"]
     cur_stock = stocks_by_store.get((matched["id"], TARGET_STORE_ID), 0.0)
     
     if cur_stock < target_stock and target_stock > 0:
-        enter_positions.append({
-            "quantity": round(target_stock - cur_stock, 2), 
-            "price": matched["price"], 
-            "assortment": {"meta": {"href": matched["href"], "type": "product", "mediaType": "application/json"}}
-        })
+        enter_positions.append({"quantity": round(target_stock - cur_stock, 2), "price": matched["price"], "assortment": {"meta": {"href": matched["href"], "type": "product", "mediaType": "application/json"}}})
 
 for (a_id, s_id), cur_stock in stocks_by_store.items():
-    if s_id != TARGET_STORE_ID or cur_stock <= 0: 
-        continue
+    if s_id != TARGET_STORE_ID or cur_stock <= 0: continue
     good = ms_goods_by_id.get(a_id)
-    if not good: 
-        continue
+    if not good: continue
     target = pos_catalog.get(good.get("name", "").lower(), {}).get("stock", 0.0)
     if cur_stock > target:
-        loss_positions.append({
-            "quantity": round(cur_stock - target, 2), 
-            "assortment": {"meta": {"href": good["href"], "type": "product", "mediaType": "application/json"}}
-        })
+        loss_positions.append({"quantity": round(cur_stock - target, 2), "assortment": {"meta": {"href": good["href"], "type": "product", "mediaType": "application/json"}}})
 
 if enter_positions:
     for i in range(0, len(enter_positions), 1000):
-        ms_session.post(f"{MOYSKLAD_URL}/entity/enter", json={
-            "organization": {"meta": {"href": ORG_HREF, "type": "organization", "mediaType": "application/json"}}, 
-            "store": {"meta": {"href": STORE_HREF, "type": "store", "mediaType": "application/json"}}, 
-            "applicable": True, 
-            "description": "Автовыравнивание (Posiflora цветы + витрина)", 
-            "positions": enter_positions[i:i+1000]
-        }, timeout=60)
+        ms_session.post(f"{MOYSKLAD_URL}/entity/enter", json={"organization": {"meta": {"href": ORG_HREF, "type": "organization", "mediaType": "application/json"}}, "store": {"meta": {"href": STORE_HREF, "type": "store", "mediaType": "application/json"}}, "applicable": True, "description": "Автовыравнивание", "positions": enter_positions[i:i+1000]}, timeout=60)
     print(f"  [+] Оприходовано: {len(enter_positions)} поз.")
 
 if loss_positions:
     for i in range(0, len(loss_positions), 1000):
-        ms_session.post(f"{MOYSKLAD_URL}/entity/loss", json={
-            "organization": {"meta": {"href": ORG_HREF, "type": "organization", "mediaType": "application/json"}}, 
-            "store": {"meta": {"href": STORE_HREF, "type": "store", "mediaType": "application/json"}}, 
-            "applicable": True, 
-            "description": "Автосписание лишних остатков", 
-            "positions": loss_positions[i:i+1000]
-        }, timeout=60)
+        ms_session.post(f"{MOYSKLAD_URL}/entity/loss", json={"organization": {"meta": {"href": ORG_HREF, "type": "organization", "mediaType": "application/json"}}, "store": {"meta": {"href": STORE_HREF, "type": "store", "mediaType": "application/json"}}, "applicable": True, "description": "Автосписание", "positions": loss_positions[i:i+1000]}, timeout=60)
     print(f"  [-] Списано: {len(loss_positions)} поз.")
 
 print("\nСинхронизация полностью завершена!")
