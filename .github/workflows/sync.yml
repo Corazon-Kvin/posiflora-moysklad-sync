@@ -21,7 +21,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests python-dotenv
+          pip install requests python-dotenv Pillow
 
       - name: Run full catalog sync
         env:
