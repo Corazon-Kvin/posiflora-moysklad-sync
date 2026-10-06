@@ -126,9 +126,11 @@ bakery_stop = ["круассан", "сосиска", "слойка", "датск
 while True:
     try:
         res = ms_s.get(f"{MOYSKLAD_URL}/entity/product?limit=100&offset={offset}&expand=productFolder,images", timeout=30)
-        if res.status_code != 200: break
+        if res.status_code != 200:
+            break
         rows = res.json().get("rows", [])
-        if not rows: break
+        if not rows:
+            break
 
         for item in rows:
             name = str(item.get("name") or "").strip()
@@ -140,7 +142,8 @@ while True:
             if any(w in name.lower() for w in bakery_stop) or any(w in folder_name.lower() for w in bakery_stop):
                 continue
 
-            if ext_code: ms_ext_codes.add(ext_code)
+            if ext_code:
+                ms_ext_codes.add(ext_code)
             ms_names.add(norm_name(name))
 
             ms_products.append({
@@ -155,13 +158,15 @@ while True:
             })
 
         offset += len(rows)
-        if len(rows) < 100: break
+        if len(rows) < 100:
+            break
     except Exception as e:
         print(f"[!] Ошибка сбора товаров МС: {e}")
         break
 
 def create_ms_product(title, ext_id, folder_href, price_rub, logo_id=None):
-    if not folder_href: return None
+    if not folder_href:
+        return None
     payload = {
         "name": title,
         "externalCode": ext_id,
@@ -182,7 +187,8 @@ def create_ms_product(title, ext_id, folder_href, price_rub, logo_id=None):
                         compressed = compress_image(raw)
                         b64 = base64.b64encode(compressed).decode("utf-8")
                         ms_s.post(f"{MOYSKLAD_URL}/entity/product/{pid}/images", json={"filename": f"{pid}.jpg", "content": b64}, timeout=25)
-            except Exception: pass
+            except Exception:
+                pass
         return prod
     return None
 
@@ -191,21 +197,25 @@ pos_showcase_bare = []
 page = 1
 while True:
     try:
-        # Запрашиваем без include, чтобы API не обрывал список!
         r = pos_s.get(f"{POSIFLORA_URL}/bouquets?page[number]={page}&page[size]=100", timeout=30)
-        if r.status_code != 200: break
+        if r.status_code != 200:
+            break
         d = r.json()
         items = d.get("data", [])
-        if not items: break
+        if not items:
+            break
 
         for it in items:
             title = it.get("attributes", {}).get("title", "").strip()
             it_id = str(it.get("id"))
             pos_showcase_bare.append({"id": it_id, "title": title})
             
-        if len(items) < 100: break
+        if len(items) < 100:
+            break
         page += 1
-    except Exception: break
+    except Exception as e:
+        print(f"  [!] Ошибка API витрины: {e}")
+        break
 
 pos_showcase_ids = {norm_name(x["title"]) for x in pos_showcase_bare}
 
@@ -217,7 +227,6 @@ for item in pos_showcase_bare:
         price_val = 0
         logo_id = None
         
-        # Точечный запрос только для НОВОГО букета (получаем цену и фото)
         try:
             r_item = pos_s.get(f"{POSIFLORA_URL}/bouquets/{item['id']}?include=prices,logo", timeout=15)
             if r_item.status_code == 200:
@@ -226,9 +235,11 @@ for item in pos_showcase_bare:
                 rel = d.get("data", {}).get("relationships", {})
                 for pr_rel in rel.get("prices", {}).get("data", []):
                     pr_obj = inc_map.get(("prices", str(pr_rel.get("id"))))
-                    if pr_obj: price_val = float(pr_obj.get("attributes", {}).get("value", 0))
+                    if pr_obj:
+                        price_val = float(pr_obj.get("attributes", {}).get("value", 0))
                 logo_rel = rel.get("logo", {}).get("data")
-                if logo_rel: logo_id = str(logo_rel.get("id"))
+                if logo_rel:
+                    logo_id = str(logo_rel.get("id"))
         except Exception as e:
             print(f"      [!] Ошибка получения деталей: {e}")
             
@@ -247,19 +258,24 @@ while True:
         if r.status_code == 404:
             print("  [-] Раздел рецептов отключен (404). Пропускаем.")
             break
-        if r.status_code != 200: break
+        if r.status_code != 200:
+            break
         d = r.json()
         items = d.get("data", [])
-        if not items: break
+        if not items:
+            break
 
         for it in items:
             title = it.get("attributes", {}).get("title", "").strip()
             it_id = str(it.get("id"))
             pos_recipes_bare.append({"id": it_id, "title": title})
             
-        if len(items) < 100: break
+        if len(items) < 100:
+            break
         page += 1
-    except Exception: break
+    except Exception as e:
+        print(f"  [!] Ошибка API рецептов: {e}")
+        break
 
 for item in pos_recipes_bare:
     n_n = norm_name(item["title"])
@@ -275,10 +291,13 @@ for item in pos_recipes_bare:
                 rel = d.get("data", {}).get("relationships", {})
                 for pr_rel in rel.get("prices", {}).get("data", []):
                     pr_obj = inc_map.get(("prices", str(pr_rel.get("id"))))
-                    if pr_obj: price_val = float(pr_obj.get("attributes", {}).get("value", 0))
+                    if pr_obj:
+                        price_val = float(pr_obj.get("attributes", {}).get("value", 0))
                 logo_rel = rel.get("logo", {}).get("data")
-                if logo_rel: logo_id = str(logo_rel.get("id"))
-        except Exception: pass
+                if logo_rel:
+                    logo_id = str(logo_rel.get("id"))
+        except Exception:
+            pass
             
         p = create_ms_product(item["title"], item["id"], folder_map.get("авторские"), price_val, logo_id)
         if p:
@@ -292,10 +311,12 @@ page = 1
 while True:
     try:
         r = pos_s.get(f"{POSIFLORA_URL}/catalog?page[number]={page}&page[size]=100&include=balances", timeout=30)
-        if r.status_code != 200: break
+        if r.status_code != 200:
+            break
         d = r.json()
         items = d.get("data", [])
-        if not items: break
+        if not items:
+            break
 
         bal_map = {}
         for inc in d.get("included", []):
@@ -309,7 +330,100 @@ while True:
             st = 0.0
             for b in it.get("relationships", {}).get("balances", {}).get("data", []):
                 bid = str(b.get("id"))
-                if bid in bal_map: st += bal_map[bid]
+                if bid in bal_map:
+                    st += bal_map[bid]
             pos_flowers[norm_name(title)] = {"id": it_id, "title": title, "stock": st}
             
-        if len(items) < 100: break
+        if len(items) < 100:
+            break
+        page += 1
+    except Exception as e:
+        print(f"  [!] Ошибка API срезки: {e}")
+        break
+
+for n_n, f_data in pos_flowers.items():
+    if f_data["id"] not in ms_ext_codes and n_n not in ms_names:
+        f_target = default_flower_folder
+        if f_target:
+            p = create_ms_product(f_data["title"], f_data["id"], f_target, 0)
+            if p:
+                ms_products.append({"id": p["id"], "name": f_data["title"], "external_code": f_data["id"], "href": p["meta"]["href"], "type": "product", "folder_href": f_target, "price": 0, "stock": 0.0})
+                ms_ext_codes.add(f_data["id"])
+                ms_names.add(n_n)
+
+print("\n9. Расчет остатков и актуализация базы...")
+enter_positions = []
+loss_positions = []
+updated_log = []
+
+vitrina_folder_href = folder_map.get("витрина", "")
+auth_folder_href = folder_map.get("авторские", "")
+
+for p in ms_products:
+    f_href = p["folder_href"]
+    cur_stock = p["stock"]
+    ext_code = p["external_code"]
+    name = p["name"]
+    n_name = norm_name(name)
+    target_stock = None
+
+    if vitrina_folder_href and vitrina_folder_href in f_href:
+        target_stock = 1.0 if n_name in pos_showcase_ids else 0.0
+    elif auth_folder_href and auth_folder_href in f_href:
+        target_stock = 5.0
+    elif len(ext_code) >= 32:
+        try:
+            r_st = pos_s.get(f"{POSIFLORA_URL}/inventory-items/{ext_code}/stats-by-store/{POSIFLORA_STORE_ID}", timeout=5)
+            if r_st.status_code == 200:
+                target_stock = float(r_st.json().get("data", {}).get("attributes", {}).get("qty", 0))
+            time.sleep(0.02)
+        except Exception:
+            pass
+
+    if target_stock is None and n_name in pos_flowers:
+        target_stock = pos_flowers[n_name]["stock"]
+
+    if target_stock is not None:
+        diff = round(target_stock - cur_stock, 2)
+        if diff != 0:
+            assort_meta = {"meta": {"href": p["href"], "type": p["type"], "mediaType": "application/json"}}
+            if diff > 0:
+                enter_positions.append({"quantity": diff, "price": p["price"], "assortment": assort_meta})
+                updated_log.append(f"  [+] {name}: было {cur_stock} -> станет {target_stock} (+{diff})")
+            elif diff < 0 and cur_stock > 0:
+                loss_positions.append({"quantity": min(abs(diff), cur_stock), "assortment": assort_meta})
+                updated_log.append(f"  [-] {name}: было {cur_stock} -> станет {target_stock} ({diff})")
+
+print(f"\nВсего изменений остатков: {len(enter_positions) + len(loss_positions)}")
+for line in updated_log[:20]:
+    print(line)
+
+if enter_positions:
+    for i in range(0, len(enter_positions), 1000):
+        try:
+            ms_s.post(f"{MOYSKLAD_URL}/entity/enter", json={
+                "organization": {"meta": {"href": ORG_HREF, "type": "organization", "mediaType": "application/json"}},
+                "store": {"meta": {"href": STORE_HREF, "type": "store", "mediaType": "application/json"}},
+                "applicable": True,
+                "description": "Автосинхронизация остатков: Posiflora -> МойСклад",
+                "positions": enter_positions[i:i+1000]
+            }, timeout=60)
+        except Exception as e:
+            print(f"[!] Ошибка enter: {e}")
+    print(f"[+] Оприходовано: {len(enter_positions)} позиций")
+
+if loss_positions:
+    for i in range(0, len(loss_positions), 1000):
+        try:
+            ms_s.post(f"{MOYSKLAD_URL}/entity/loss", json={
+                "organization": {"meta": {"href": ORG_HREF, "type": "organization", "mediaType": "application/json"}},
+                "store": {"meta": {"href": STORE_HREF, "type": "store", "mediaType": "application/json"}},
+                "applicable": True,
+                "description": "Автосписание проданных остатков",
+                "positions": loss_positions[i:i+1000]
+            }, timeout=60)
+        except Exception as e:
+            print(f"[!] Ошибка loss: {e}")
+    print(f"[-] Списано: {len(loss_positions)} позиций")
+
+print("\nПолная синхронизация завершена успешно!")
