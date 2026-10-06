@@ -1,455 +1,486 @@
-import os
-import io
-import re
-import time
-import base64
-import requests
-from PIL import Image
+# =============================================================================
+#  ABANDONED STEEL MILL / REACTOR SHAFT — MULTI-TIER DUEL ARENA GENERATOR
+#  Unreal Engine 5 — Python Editor Scripting Plugin
+#  ВСЕ ПОВЕРХНОСТИ СТРОГО ГОРИЗОНТАЛЬНЫ (Pitch = 0.0, Roll = 0.0)
+# =============================================================================
 
-# === Переменные окружения и ключи ===
-POSIFLORA_USER = os.getenv("POSIFLORA_USER", "cvetistroginorf")
-POSIFLORA_PASS = os.getenv("POSIFLORA_PASS", "19478893")
-POSIFLORA_URL = "https://lakmaflowers.posiflora.com/api/v1"
-POSIFLORA_STORE_ID = "cde3de25-51e3-4193-a164-84cdebd01e94"
+import unreal
+import math
 
-MOYSKLAD_TOKEN = os.getenv("MOYSKLAD_TOKEN", "d528d07b79305bf9859c706da2cbd62c7777ecf0")
-MOYSKLAD_URL = "https://api.moysklad.ru/api/remap/1.2"
+# -----------------------------------------------------------------------------
+# ГЛОБАЛЬНЫЕ КОНСТАНТЫ
+# -----------------------------------------------------------------------------
+FOLDER_NAME = "Generated_Arena"
+CUBE_ASSET_PATH = '/Engine/BasicShapes/Cube.Cube'
+CYLINDER_ASSET_PATH = '/Engine/BasicShapes/Cylinder.Cylinder'
 
-TARGET_STORE_ID = "fc24f096-af79-11f1-0a80-0c0a0039483e"
-ORG_ID = "b34f89b3-c981-11ee-0a80-07770038ef19"
+EDITOR_ACTOR_SUBSYSTEM = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
 
-STORE_HREF = f"{MOYSKLAD_URL}/entity/store/{TARGET_STORE_ID}"
-ORG_HREF = f"{MOYSKLAD_URL}/entity/organization/{ORG_ID}"
+CUBE_MESH = unreal.EditorAssetLibrary.load_asset(CUBE_ASSET_PATH)
+CYLINDER_MESH = unreal.EditorAssetLibrary.load_asset(CYLINDER_ASSET_PATH)
 
-# === БЕТОННЫЙ ФИЛЬТР МУСОРА ===
-STOP_WORDS = ["круассан", "сосиска", "слойка", "датская", "кремибон", "хлеб", "чиабатта", "багет", "сырник", "кофе", "напиток", "эспрессо", "капучино", "макарон", "эклер", "тарталет", "кофейня"]
+# Эргономика персонажа (1 unit = 1 cm)
+JUMP_STEP = 48.0          # высота шага (45-50 см)
+MANTLE_SHELF = 145.0      # высота уступа под мантлинг (120-150 см)
+PLATE_THICKNESS = 0.2     # толщина перекрытий (20 см)
+CATWALK_THICKNESS = 0.2
+TOP_THICKNESS = 0.25
 
-def is_junk(name, price=None):
-    n = name.lower()
-    if any(w in n for w in STOP_WORDS): return True
-    if re.search(r'букет\s*\d{6,}', n): return True
-    if price is not None and price <= 0: return True
-    return False
+SPAWNED_ACTORS = []
 
-def norm_name(s):
-    clean = re.sub(r'[\(\)\-\_\,\.\"]', ' ', str(s or '')).strip().lower()
-    clean = re.sub(r'^букет\s+', '', clean)
-    return re.sub(r'\s+', ' ', clean).strip()
 
-def compress_image(image_bytes, max_dim=1200, quality=85):
+# -----------------------------------------------------------------------------
+# БАЗОВЫЕ ХЕЛПЕРЫ
+# -----------------------------------------------------------------------------
+def make_flat_rotator(yaw):
+    """Единственный разрешённый ротатор: Pitch и Roll всегда 0.0."""
+    return unreal.Rotator(roll=0.0, pitch=0.0, yaw=float(yaw))
+
+
+def spawn_mesh_actor(mesh_asset, label, location, scale, yaw=0.0):
+    """Спавнит StaticMeshActor, назначает меш, коллизию, ярлык и папку."""
+    actor = EDITOR_ACTOR_SUBSYSTEM.spawn_actor_from_class(
+        unreal.StaticMeshActor,
+        location,
+        make_flat_rotator(yaw)
+    )
+    if actor is None:
+        return None
+
+    mesh_component = actor.get_editor_property("static_mesh_component")
+
     try:
-        img = Image.open(io.BytesIO(image_bytes))
-        if img.mode in ("RGBA", "P"):
-            img = img.convert("RGB")
-        w, h = img.size
-        if max(w, h) > max_dim:
-            if w > h:
-                new_w = max_dim
-                new_h = int(h * (max_dim / w))
-            else:
-                new_h = max_dim
-                new_w = int(w * (max_dim / h))
-            img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-        out = io.BytesIO()
-        img.save(out, format="JPEG", quality=quality, optimize=True)
-        return out.getvalue()
+        mesh_component.set_editor_property("mobility", unreal.ComponentMobility.MOVABLE)
     except Exception:
-        return image_bytes
+        pass
 
-print("1. Подключение к API...")
-pos_s = requests.Session()
-pos_s.headers.update({"Content-Type": "application/vnd.api+json", "Accept": "application/vnd.api+json"})
-resp = pos_s.post(f"{POSIFLORA_URL}/sessions", json={
-    "data": {"type": "sessions", "attributes": {"username": POSIFLORA_USER, "password": POSIFLORA_PASS}}
-}, timeout=20)
+    mesh_component.set_editor_property("static_mesh", mesh_asset)
+    actor.set_actor_scale3d(scale)
 
-if resp.status_code in (200, 201):
-    pos_s.headers.update({"Authorization": f"Bearer {resp.json()['data']['attributes']['accessToken']}"})
-else:
-    print(f"[-] Ошибка авторизации Posiflora: {resp.status_code}")
-    exit()
-
-ms_s = requests.Session()
-ms_s.headers.update({"Authorization": f"Bearer {MOYSKLAD_TOKEN.strip()}", "Content-Type": "application/json"})
-
-print("\n1.5 Получение системного типа цены...")
-price_type_meta = None
-try:
-    r_pt = ms_s.get(f"{MOYSKLAD_URL}/context/companysettings/pricetype", timeout=15)
-    if r_pt.status_code == 200:
-        pts = r_pt.json()
-        found_meta = next((pt.get("meta") for pt in pts if pt.get("name") == "Цена продажи"), None)
-        price_type_meta = found_meta if found_meta else (pts[0].get("meta") if pts else None)
-except Exception as e:
-    print(f"[!] Ошибка цены: {e}")
-
-print("\n2. Умное сканирование папок МоегоСклада...")
-folder_map = {}
-default_flower_folder = None
-default_decor_folder = None
-offset = 0
-while True:
+    # Стандартная блочная коллизия
     try:
-        rf = ms_s.get(f"{MOYSKLAD_URL}/entity/productfolder?limit=100&offset={offset}", timeout=30).json()
-        f_rows = rf.get("rows", [])
-        if not f_rows: break
-        for f in f_rows:
-            f_name = f.get("name", "").strip().lower()
-            f_href = f["meta"]["href"]
-            if "витрина" in f_name: folder_map["витрина"] = f_href
-            if "авторские" in f_name: folder_map["авторские"] = f_href
-            if "цветы" in f_name: default_flower_folder = f_href
-            if "декор" in f_name: default_decor_folder = f_href
-            if "шар" in f_name: folder_map["шары"] = f_href
-            if "ваз" in f_name: folder_map["вазы"] = f_href
-            if "свеч" in f_name: folder_map["свечи"] = f_href
-            if "упаковк" in f_name or "лент" in f_name: folder_map["упаковка"] = f_href
-        offset += len(f_rows)
-        if len(f_rows) < 100: break
-    except Exception as e:
-        print(f"[!] Ошибка сканирования папок: {e}")
-        break
-
-def get_folder_href_for_item(name, category_name=""):
-    search_text = f"{name} {category_name}".lower()
-    if "витрин" in search_text: return folder_map.get("витрина")
-    if "свеч" in search_text: return folder_map.get("свечи", default_decor_folder)
-    if "ваз" in search_text: return folder_map.get("вазы", default_decor_folder)
-    if "подсвечник" in search_text: return folder_map.get("подсвечники", default_decor_folder)
-    if "шар" in search_text: return folder_map.get("шары", default_decor_folder)
-    if "открытк" in search_text or "конверт" in search_text: return folder_map.get("открытки", default_decor_folder)
-    if "коробк" in search_text: return folder_map.get("подарочные коробки", default_decor_folder)
-    if "игрушк" in search_text: return folder_map.get("игрушки", default_decor_folder)
-    if "лент" in search_text or "упаковк" in search_text or "пленк" in search_text: return folder_map.get("упаковка", default_decor_folder)
-    return default_flower_folder or default_decor_folder
-
-print("\n3. Сбор остатков склада...")
-ms_current_stocks = {}
-try:
-    r_stocks = ms_s.get(f"{MOYSKLAD_URL}/report/stock/bystore/current", timeout=45)
-    if r_stocks.status_code == 200:
-        for row in r_stocks.json():
-            if row.get("assortmentId") and row.get("storeId") == TARGET_STORE_ID:
-                ms_current_stocks[row["assortmentId"]] = float(row.get("stock", 0))
-except Exception as e:
-    pass
-
-print("\n4. Сбор существующих позиций в МоемСкладе...")
-offset = 0
-ms_products = []
-ms_ext_codes = set()
-ms_names = set()
-
-while True:
+        mesh_component.set_collision_profile_name("BlockAll")
+    except Exception:
+        pass
     try:
-        res = ms_s.get(f"{MOYSKLAD_URL}/entity/product?limit=100&offset={offset}&expand=productFolder", timeout=30)
-        if res.status_code != 200: break
-        rows = res.json().get("rows", [])
-        if not rows: break
+        mesh_component.set_collision_enabled(unreal.CollisionEnabled.QUERY_AND_PHYSICS)
+    except Exception:
+        pass
+    try:
+        mesh_component.set_editor_property("cast_shadow", True)
+    except Exception:
+        pass
 
-        for item in rows:
-            name = str(item.get("name") or "").strip()
-            folder_obj = item.get("productFolder", {})
-            folder_href = folder_obj.get("meta", {}).get("href", "")
-            ext_code = str(item.get("externalCode") or "")
+    try:
+        mesh_component.set_editor_property("mobility", unreal.ComponentMobility.STATIC)
+    except Exception:
+        pass
 
-            if is_junk(name): continue # Игнорируем пекарню внутри МС
+    actor.set_actor_label(label)
+    actor.set_folder_path(unreal.Name(FOLDER_NAME))
+    SPAWNED_ACTORS.append(actor)
+    return actor
 
-            if ext_code: ms_ext_codes.add(ext_code)
-            ms_names.add(norm_name(name))
 
-            ms_products.append({
-                "id": item["id"],
-                "name": name,
-                "external_code": ext_code,
-                "href": item["meta"]["href"],
-                "type": item.get("meta", {}).get("type", "product"),
-                "folder_href": folder_href,
-                "price": item.get("salePrices", [{}])[0].get("value", 0) if item.get("salePrices") else 0,
-                "stock": ms_current_stocks.get(item["id"], 0.0)
-            })
-        offset += len(rows)
-        if len(rows) < 100: break
-    except Exception as e:
-        break
+def spawn_plate(label, x, y, top_z, scale_x, scale_y, scale_z=PLATE_THICKNESS, yaw=0.0):
+    """Горизонтальная плита. top_z — координата ВЕРХНЕЙ (ходибельной) поверхности."""
+    center_z = float(top_z) - (float(scale_z) * 100.0) * 0.5
+    return spawn_mesh_actor(
+        CUBE_MESH, label,
+        unreal.Vector(float(x), float(y), center_z),
+        unreal.Vector(float(scale_x), float(scale_y), float(scale_z)),
+        yaw
+    )
 
-def create_ms_product(title, ext_id, folder_href, price_rub, logo_id=None):
-    if not folder_href: return None
-    payload = {
-        "name": title,
-        "externalCode": ext_id,
-        "productFolder": {"meta": {"href": folder_href, "type": "productfolder", "mediaType": "application/json"}}
-    }
-    
-    if price_type_meta and price_rub > 0:
-        payload["salePrices"] = [{"value": int(price_rub * 100), "priceType": {"meta": price_type_meta}}]
-        
-    cr = ms_s.post(f"{MOYSKLAD_URL}/entity/product", json=payload, timeout=20)
-    if cr.status_code in (200, 201):
-        prod = cr.json()
-        pid = prod["id"]
-        if logo_id:
+
+def spawn_box_on_ground(label, x, y, base_z, scale_x, scale_y, scale_z, yaw=0.0):
+    """Объёмный блок, стоящий НА поверхности base_z (укрытия, колонны, бортики)."""
+    center_z = float(base_z) + (float(scale_z) * 100.0) * 0.5
+    return spawn_mesh_actor(
+        CUBE_MESH, label,
+        unreal.Vector(float(x), float(y), center_z),
+        unreal.Vector(float(scale_x), float(scale_y), float(scale_z)),
+        yaw
+    )
+
+
+def spawn_beam(label, x, y, center_z, scale_x, scale_y, scale_z, yaw=0.0):
+    """Балка / элемент каркаса, позиционируемый по центру."""
+    return spawn_mesh_actor(
+        CUBE_MESH, label,
+        unreal.Vector(float(x), float(y), float(center_z)),
+        unreal.Vector(float(scale_x), float(scale_y), float(scale_z)),
+        yaw
+    )
+
+
+def spawn_cylinder(label, x, y, center_z, scale_x, scale_y, scale_z, yaw=0.0):
+    return spawn_mesh_actor(
+        CYLINDER_MESH, label,
+        unreal.Vector(float(x), float(y), float(center_z)),
+        unreal.Vector(float(scale_x), float(scale_y), float(scale_z)),
+        yaw
+    )
+
+
+def spawn_player_start(label, x, y, z, yaw):
+    actor = EDITOR_ACTOR_SUBSYSTEM.spawn_actor_from_class(
+        unreal.PlayerStart,
+        unreal.Vector(float(x), float(y), float(z)),
+        make_flat_rotator(yaw)
+    )
+    if actor is None:
+        return None
+    actor.set_actor_label(label)
+    actor.set_folder_path(unreal.Name(FOLDER_NAME))
+    SPAWNED_ACTORS.append(actor)
+    return actor
+
+
+# -----------------------------------------------------------------------------
+# 0. ОЧИСТКА СЦЕНЫ + ОПРЕДЕЛЕНИЕ ВЫСОТЫ ПРИВЯЗКИ
+# -----------------------------------------------------------------------------
+def resolve_target_z_and_cleanup():
+    all_actors = EDITOR_ACTOR_SUBSYSTEM.get_all_level_actors()
+
+    target_z = None
+    doomed = []
+
+    # --- Сначала читаем высоту у ВНЕШНИХ (не сгенерированных) акторов ---
+    external_actors = []
+    for actor in all_actors:
+        if actor is None:
+            continue
+        try:
+            folder = str(actor.get_folder_path())
+        except Exception:
+            folder = ""
+        if folder == FOLDER_NAME:
+            doomed.append(actor)
+            continue
+        external_actors.append(actor)
+
+    # Приоритет 1: существующий PlayerStart
+    for actor in external_actors:
+        if isinstance(actor, unreal.PlayerStart):
+            target_z = float(actor.get_actor_location().z)
+            break
+
+    # Приоритет 2: актор с ярлыком Floor / Platform / Base
+    if target_z is None:
+        for actor in external_actors:
             try:
-                r_img = pos_s.get(f"{POSIFLORA_URL}/images/{logo_id}", timeout=15)
-                if r_img.status_code == 200:
-                    img_url = r_img.json().get("data", {}).get("attributes", {}).get("url")
-                    if img_url:
-                        hdrs = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-                        raw = requests.get(img_url, headers=hdrs, timeout=20, allow_redirects=True).content
-                        compressed = compress_image(raw)
-                        b64 = base64.b64encode(compressed).decode("utf-8")
-                        ms_s.post(f"{MOYSKLAD_URL}/entity/product/{pid}/images", json={"filename": f"{pid}.jpg", "content": b64}, timeout=25)
-            except Exception: pass
-        return prod
-    return None
+                label = str(actor.get_actor_label())
+            except Exception:
+                continue
+            low = label.lower()
+            if ("floor" in low) or ("platform" in low) or ("base" in low):
+                target_z = float(actor.get_actor_location().z)
+                break
 
-print("\n5. Витрина (обход мусора)...")
-pos_showcase_bare = []
-page = 1
-while True:
-    try:
-        r = pos_s.get(f"{POSIFLORA_URL}/bouquets?page[number]={page}&page[size]=100", timeout=30)
-        if r.status_code != 200: break
-        items = r.json().get("data", [])
-        if not items: break
+    # Приоритет 3: фолбэк
+    if target_z is None:
+        target_z = 250.0
+        unreal.log_warning("[ARENA] Опорные акторы не найдены. target_z = 250.0")
+    else:
+        unreal.log("[ARENA] Определён target_z = {0}".format(target_z))
 
-        for it in items:
-            title = it.get("attributes", {}).get("title", "").strip()
-            if not is_junk(title):
-                pos_showcase_bare.append({"id": str(it.get("id")), "title": title})
-            
-        if len(items) < 100: break
-        page += 1
-    except Exception: break
+    # Все PlayerStart подлежат удалению (будут созданы заново)
+    for actor in external_actors:
+        if isinstance(actor, unreal.PlayerStart):
+            doomed.append(actor)
 
-pos_showcase_ids = {norm_name(x["title"]) for x in pos_showcase_bare}
-
-for item in pos_showcase_bare:
-    n_n = norm_name(item["title"])
-    if item["id"] not in ms_ext_codes and n_n not in ms_names:
-        price_val = 0
-        logo_id = None
+    removed = 0
+    for actor in doomed:
         try:
-            r_item = pos_s.get(f"{POSIFLORA_URL}/bouquets/{item['id']}?include=prices,logo", timeout=15)
-            if r_item.status_code == 200:
-                d = r_item.json()
-                inc_map = {(inc.get("type"), str(inc.get("id"))): inc for inc in d.get("included", [])}
-                rel = d.get("data", {}).get("relationships", {})
-                for pr_rel in rel.get("prices", {}).get("data", []):
-                    pr_obj = inc_map.get(("prices", str(pr_rel.get("id"))))
-                    if pr_obj: price_val = float(pr_obj.get("attributes", {}).get("value", 0))
-                
-                if price_val == 0: price_val = float(d.get("data", {}).get("attributes", {}).get("price", 0))
-                logo_rel = rel.get("logo", {}).get("data")
-                if logo_rel: logo_id = str(logo_rel.get("id"))
-        except Exception: pass
+            EDITOR_ACTOR_SUBSYSTEM.destroy_actor(actor)
+            removed += 1
+        except Exception:
+            pass
 
-        if is_junk(item["title"], price_val): continue
-            
-        print(f"  [+] Создаем витринный букет: {item['title']}")
-        p = create_ms_product(item["title"], item["id"], folder_map.get("витрина"), price_val, logo_id)
-        if p:
-            ms_products.append({"id": p["id"], "name": item["title"], "external_code": item["id"], "href": p["meta"]["href"], "type": "product", "folder_href": folder_map.get("витрина"), "price": int(price_val * 100), "stock": 0.0})
-            ms_ext_codes.add(item["id"])
-            ms_names.add(n_n)
+    unreal.log("[ARENA] Удалено старых акторов: {0}".format(removed))
+    return target_z
 
-print("\n6. Авторские букеты...")
-pos_recipes_bare = []
-page = 1
-while True:
-    try:
-        r = pos_s.get(f"{POSIFLORA_URL}/recipes?page[number]={page}&page[size]=100", timeout=30)
-        if r.status_code != 200: break
-        items = r.json().get("data", [])
-        if not items: break
 
-        for it in items:
-            title = it.get("attributes", {}).get("title", "").strip()
-            if not is_junk(title):
-                pos_recipes_bare.append({"id": str(it.get("id")), "title": title})
-            
-        if len(items) < 100: break
-        page += 1
-    except Exception: break
+# -----------------------------------------------------------------------------
+# ЯРУС 1: НИЖНИЙ ЦЕХ
+# -----------------------------------------------------------------------------
+def build_tier_1_foundry(z0):
+    # --- Поднимающаяся лава (визуальное дно шахты) ---
+    spawn_cylinder("Lava_Surface_Поверхность_Лавы", 0.0, 0.0, z0 - 520.0, 60.0, 60.0, 0.6)
+    spawn_cylinder("Lava_Shaft_Стена_Шахты", 0.0, 0.0, z0 - 260.0, 62.0, 62.0, 5.0)
 
-for item in pos_recipes_bare:
-    n_n = norm_name(item["title"])
-    if item["id"] not in ms_ext_codes and n_n not in ms_names:
-        price_val = 0
-        logo_id = None
-        try:
-            r_item = pos_s.get(f"{POSIFLORA_URL}/recipes/{item['id']}?include=prices,logo", timeout=15)
-            if r_item.status_code == 200:
-                d = r_item.json()
-                inc_map = {(inc.get("type"), str(inc.get("id"))): inc for inc in d.get("included", [])}
-                rel = d.get("data", {}).get("relationships", {})
-                for pr_rel in rel.get("prices", {}).get("data", []):
-                    pr_obj = inc_map.get(("prices", str(pr_rel.get("id"))))
-                    if pr_obj: price_val = float(pr_obj.get("attributes", {}).get("value", 0))
-                if price_val == 0: price_val = float(d.get("data", {}).get("attributes", {}).get("price", 0))
-                logo_rel = rel.get("logo", {}).get("data")
-                if logo_rel: logo_id = str(logo_rel.get("id"))
-        except Exception: pass
+    # --- Основная круглая база (верхняя поверхность ровно на z0) ---
+    spawn_cylinder("Base_Floor_Основной_Пол_Цеха", 0.0, 0.0, z0 - 20.0, 32.0, 32.0, 0.4)
 
-        if is_junk(item["title"], price_val): continue
-            
-        p = create_ms_product(item["title"], item["id"], folder_map.get("авторские"), price_val, logo_id)
-        if p:
-            ms_products.append({"id": p["id"], "name": item["title"], "external_code": item["id"], "href": p["meta"]["href"], "type": "product", "folder_href": folder_map.get("авторские"), "price": int(price_val * 100), "stock": 0.0})
-            ms_ext_codes.add(item["id"])
-            ms_names.add(n_n)
+    # --- Бортик по периметру нижнего цеха (24 сегмента) ---
+    rim_radius = 1580.0
+    for i in range(24):
+        angle_deg = i * 15.0
+        angle_rad = math.radians(angle_deg)
+        px = rim_radius * math.cos(angle_rad)
+        py = rim_radius * math.sin(angle_rad)
+        spawn_box_on_ground(
+            "Rim_Guard_Бортик_Цеха_{0:02d}".format(i + 1),
+            px, py, z0, 0.4, 4.6, 1.0, angle_deg
+        )
 
-print("\n7. Штучные товары и декор...")
-pos_inventory = []
-page = 1
-while True:
-    try:
-        r = pos_s.get(f"{POSIFLORA_URL}/inventory-items?page[number]={page}&page[size]=100&include=category,logo,prices", timeout=30)
-        if r.status_code != 200: break
-        d = r.json()
-        items = d.get("data", [])
-        if not items: break
+    # --- Центральное ядро реактора (несущая опора + блокировка прямой линии огня) ---
+    spawn_cylinder("Reactor_Core_Ядро_Реактора", 0.0, 0.0, z0 + 347.5, 7.0, 7.0, 6.95)
+    spawn_cylinder("Reactor_Ring_Кольцо_Ядра_Нижнее", 0.0, 0.0, z0 + 120.0, 8.0, 8.0, 0.5)
+    spawn_cylinder("Reactor_Ring_Кольцо_Ядра_Среднее", 0.0, 0.0, z0 + 400.0, 7.8, 7.8, 0.4)
 
-        inc_map = {(inc.get("type"), str(inc.get("id"))): inc for inc in d.get("included", [])}
-        for it in items:
-            title = it.get("attributes", {}).get("title", "").strip()
-            if is_junk(title): continue
-            
-            it_id = str(it.get("id"))
-            rel = it.get("relationships", {})
-            
-            cat_name = ""
-            cat_rel = rel.get("category", {}).get("data")
-            if cat_rel and cat_rel.get("id"):
-                cat_obj = inc_map.get(("categories", str(cat_rel["id"])))
-                if cat_obj: cat_name = cat_obj.get("attributes", {}).get("title", "")
+    # --- PlayerStart'ы ---
+    spawn_player_start("PlayerStart_A", -1100.0, 0.0, z0 + 40.0, 0.0)
+    spawn_player_start("PlayerStart_B", 1100.0, 0.0, z0 + 40.0, 180.0)
 
-            price_val = 0
-            for pr_rel in rel.get("prices", {}).get("data", []):
-                pr_obj = inc_map.get(("prices", str(pr_rel.get("id"))))
-                if pr_obj: price_val = float(pr_obj.get("attributes", {}).get("value", 0))
+    # --- Промышленные укрытия возле спавнов (130-140 см) ---
+    for side in (-1.0, 1.0):
+        tag = "A" if side < 0.0 else "B"
 
-            if is_junk(title, price_val): continue
+        spawn_box_on_ground("Cover_Трансформатор_{0}_1".format(tag),
+                            side * 820.0, 300.0, z0, 1.6, 2.4, 1.4)
+        spawn_box_on_ground("Cover_Трансформатор_{0}_2".format(tag),
+                            side * 820.0, -300.0, z0, 1.6, 2.4, 1.4)
+        spawn_box_on_ground("Cover_Ящик_{0}_1".format(tag),
+                            side * 1260.0, 640.0, z0, 1.3, 1.3, 1.35)
+        spawn_box_on_ground("Cover_Ящик_{0}_2".format(tag),
+                            side * 1260.0, -640.0, z0, 1.3, 1.3, 1.35)
+        spawn_box_on_ground("Cover_Стена_Щитовая_{0}".format(tag),
+                            side * 480.0, 0.0, z0, 0.9, 4.2, 1.35)
 
-            logo_id = None
-            logo_rel = rel.get("logo", {}).get("data")
-            if logo_rel: logo_id = str(logo_rel.get("id"))
-                
-            pos_inventory.append({"id": it_id, "title": title, "category": cat_name, "price": price_val, "logo_id": logo_id})
-            
-        if len(items) < 100: break
-        page += 1
-    except Exception: break
+        # Связка "прыжковый шаг 48 см -> уступ мантлинга 145 см"
+        for lateral in (-1.0, 1.0):
+            sfx = "N" if lateral > 0.0 else "S"
+            spawn_box_on_ground(
+                "Jump_Step_Ступень_{0}_{1}".format(tag, sfx),
+                side * 700.0, lateral * 1010.0, z0, 1.6, 1.6, JUMP_STEP / 100.0
+            )
+            spawn_box_on_ground(
+                "Mantle_Shelf_Уступ_{0}_{1}".format(tag, sfx),
+                side * 960.0, lateral * 1010.0, z0, 1.6, 1.6, MANTLE_SHELF / 100.0
+            )
 
-for item in pos_inventory:
-    n_n = norm_name(item["title"])
-    if item["id"] not in ms_ext_codes and n_n not in ms_names:
-        f_target = get_folder_href_for_item(item["title"], item["category"])
-        if f_target:
-            p = create_ms_product(item["title"], item["id"], f_target, item["price"], item["logo_id"])
-            if p:
-                ms_products.append({"id": p["id"], "name": item["title"], "external_code": item["id"], "href": p["meta"]["href"], "type": "product", "folder_href": f_target, "price": int(item["price"] * 100), "stock": 0.0})
-                ms_ext_codes.add(item["id"])
-                ms_names.add(n_n)
 
-print("\n8. Срезка...")
-pos_flowers = {}
-page = 1
-while True:
-    try:
-        r = pos_s.get(f"{POSIFLORA_URL}/catalog?page[number]={page}&page[size]=100&include=balances", timeout=30)
-        if r.status_code != 200: break
-        d = r.json()
-        items = d.get("data", [])
-        if not items: break
+# -----------------------------------------------------------------------------
+# КАРКАС ЗАВОДА: КОЛОННЫ, БАЛКИ, КРЫША, МОСТОВОЙ КРАН
+# -----------------------------------------------------------------------------
+def build_factory_frame(z0):
+    column_height_scale = 13.0  # 1300 см
+    corners = [(-600.0, -600.0, "SW"), (-600.0, 600.0, "NW"),
+               (600.0, 600.0, "NE"), (600.0, -600.0, "SE")]
 
-        bal_map = {}
-        for inc in d.get("included", []):
-            if inc.get("type") == "item-balances":
-                attrs = inc.get("attributes", {})
-                bal_map[str(inc.get("id"))] = max(float(attrs.get("qtyOnWindow") or 0), float(attrs.get("qty") or 0))
+    for (cx, cy, name) in corners:
+        spawn_box_on_ground("Column_Колонна_{0}".format(name),
+                            cx, cy, z0, 2.0, 2.0, column_height_scale)
+        spawn_box_on_ground("Column_Base_Пята_Колонны_{0}".format(name),
+                            cx, cy, z0, 2.8, 2.8, 0.45)
 
-        for it in items:
-            title = str(it.get("attributes", {}).get("title") or "").strip()
-            if is_junk(title): continue
-            it_id = str(it.get("id"))
-            st = 0.0
-            for b in it.get("relationships", {}).get("balances", {}).get("data", []):
-                bid = str(b.get("id"))
-                if bid in bal_map: st += bal_map[bid]
-            pos_flowers[norm_name(title)] = {"id": it_id, "title": title, "stock": st}
-            
-        if len(items) < 100: break
-        page += 1
-    except Exception: break
+    # --- Связующие балки: нижний пояс (Z + 350) ---
+    spawn_beam("Beam_Балка_Нижняя_West", -600.0, 0.0, z0 + 350.0, 0.5, 12.0, 0.6)
+    spawn_beam("Beam_Балка_Нижняя_East", 600.0, 0.0, z0 + 350.0, 0.5, 12.0, 0.6)
+    spawn_beam("Beam_Балка_Нижняя_North", 0.0, 600.0, z0 + 350.0, 12.0, 0.5, 0.6)
+    spawn_beam("Beam_Балка_Нижняя_South", 0.0, -600.0, z0 + 350.0, 12.0, 0.5, 0.6)
 
-for n_n, f_data in pos_flowers.items():
-    if f_data["id"] not in ms_ext_codes and n_n not in ms_names:
-        f_target = default_flower_folder
-        if f_target:
-            p = create_ms_product(f_data["title"], f_data["id"], f_target, 0)
-            if p:
-                ms_products.append({"id": p["id"], "name": f_data["title"], "external_code": f_data["id"], "href": p["meta"]["href"], "type": "product", "folder_href": f_target, "price": 0, "stock": 0.0})
-                ms_ext_codes.add(f_data["id"])
-                ms_names.add(n_n)
+    # --- Связующие балки: верхний пояс под краном (Z + 700) ---
+    spawn_beam("Beam_Балка_Верхняя_West", -600.0, 0.0, z0 + 700.0, 0.5, 12.0, 0.5)
+    spawn_beam("Beam_Балка_Верхняя_East", 600.0, 0.0, z0 + 700.0, 0.5, 12.0, 0.5)
+    spawn_beam("Beam_Балка_Верхняя_North", 0.0, 600.0, z0 + 700.0, 12.0, 0.5, 0.5)
+    spawn_beam("Beam_Балка_Верхняя_South", 0.0, -600.0, z0 + 700.0, 12.0, 0.5, 0.5)
 
-print("\n9. Актуализация базы...")
-enter_positions = []
-loss_positions = []
+    # --- Рельсы мостового крана ---
+    spawn_beam("Crane_Rail_Рельс_North", 0.0, 600.0, z0 + 1150.0, 12.6, 0.6, 0.5)
+    spawn_beam("Crane_Rail_Рельс_South", 0.0, -600.0, z0 + 1150.0, 12.6, 0.6, 0.5)
 
-vitrina_folder_href = folder_map.get("витрина", "")
-auth_folder_href = folder_map.get("авторские", "")
+    # --- Мост крана и подвесной крюк ---
+    spawn_beam("Crane_Bridge_Мост_Крана", 0.0, 0.0, z0 + 1075.0, 1.2, 13.0, 0.8)
+    spawn_beam("Crane_Trolley_Тележка_Крана", 0.0, 0.0, z0 + 1010.0, 1.8, 1.8, 0.6)
+    spawn_beam("Crane_Cable_Трос_Крана", 0.0, 0.0, z0 + 920.0, 0.18, 0.18, 1.2)
+    spawn_beam("Crane_Hook_Ковш_Крана", 0.0, 0.0, z0 + 835.0, 1.6, 1.6, 0.5)
 
-for p in ms_products:
-    f_href = p["folder_href"]
-    cur_stock = p["stock"]
-    ext_code = p["external_code"]
-    name = p["name"]
-    n_name = norm_name(name)
-    target_stock = None
+    # --- Крыша цеха (перекрытия по верху колонн) ---
+    spawn_beam("Roof_Крыша_Балка_West", -600.0, 0.0, z0 + 1280.0, 0.6, 13.0, 0.4)
+    spawn_beam("Roof_Крыша_Балка_East", 600.0, 0.0, z0 + 1280.0, 0.6, 13.0, 0.4)
+    spawn_beam("Roof_Крыша_Балка_North", 0.0, 600.0, z0 + 1280.0, 13.0, 0.6, 0.4)
+    spawn_beam("Roof_Крыша_Балка_South", 0.0, -600.0, z0 + 1280.0, 13.0, 0.6, 0.4)
+    spawn_beam("Roof_Крыша_Прогон_C1", 0.0, 200.0, z0 + 1280.0, 12.0, 0.4, 0.3)
+    spawn_beam("Roof_Крыша_Прогон_C2", 0.0, -200.0, z0 + 1280.0, 12.0, 0.4, 0.3)
 
-    if vitrina_folder_href and vitrina_folder_href in f_href:
-        target_stock = 1.0 if n_name in pos_showcase_ids else 0.0
-    elif auth_folder_href and auth_folder_href in f_href:
-        target_stock = 5.0
-    elif len(ext_code) >= 32:
-        try:
-            r_st = pos_s.get(f"{POSIFLORA_URL}/inventory-items/{ext_code}/stats-by-store/{POSIFLORA_STORE_ID}", timeout=5)
-            if r_st.status_code == 200:
-                target_stock = float(r_st.json().get("data", {}).get("attributes", {}).get("qty", 0))
-            time.sleep(0.02)
-        except Exception: pass
 
-    if target_stock is None and n_name in pos_flowers:
-        target_stock = pos_flowers[n_name]["stock"]
+# -----------------------------------------------------------------------------
+# ЯРУС 2: МОСТИКИ ТЕХОБСЛУЖИВАНИЯ + ПРЯМЫЕ ЛЕСТНИЧНЫЕ МАРШИ
+# -----------------------------------------------------------------------------
+def build_tier_2_catwalks(z0):
+    catwalk_top = z0 + 288.0
+    catwalk_half_len = 325.0   # Scale X 6.5 -> 650 см
+    catwalk_half_wid = 120.0   # Scale Y 2.4 -> 240 см
 
-    if target_stock is not None:
-        diff = round(target_stock - cur_stock, 2)
-        if diff != 0:
-            assort_meta = {"meta": {"href": p["href"], "type": p["type"], "mediaType": "application/json"}}
-            if diff > 0:
-                enter_positions.append({"quantity": diff, "price": p["price"], "assortment": assort_meta})
-            elif diff < 0 and cur_stock > 0:
-                loss_positions.append({"quantity": min(abs(diff), cur_stock), "assortment": assort_meta})
+    for sign_y in (1.0, -1.0):
+        side_name = "North" if sign_y > 0.0 else "South"
+        cy = sign_y * 900.0
 
-if enter_positions:
-    for i in range(0, len(enter_positions), 1000):
-        ms_s.post(f"{MOYSKLAD_URL}/entity/enter", json={
-            "organization": {"meta": {"href": ORG_HREF, "type": "organization", "mediaType": "application/json"}},
-            "store": {"meta": {"href": STORE_HREF, "type": "store", "mediaType": "application/json"}},
-            "applicable": True,
-            "description": "Автосинхронизация остатков",
-            "positions": enter_positions[i:i+1000]
-        }, timeout=60)
+        # --- Мостик обслуживания ---
+        spawn_plate("Catwalk_Мостик_{0}".format(side_name),
+                    0.0, cy, catwalk_top, 6.5, 2.4, CATWALK_THICKNESS)
 
-if loss_positions:
-    for i in range(0, len(loss_positions), 1000):
-        ms_s.post(f"{MOYSKLAD_URL}/entity/loss", json={
-            "organization": {"meta": {"href": ORG_HREF, "type": "organization", "mediaType": "application/json"}},
-            "store": {"meta": {"href": STORE_HREF, "type": "store", "mediaType": "application/json"}},
-            "applicable": True,
-            "description": "Автосписание проданных остатков",
-            "positions": loss_positions[i:i+1000]
-        }, timeout=60)
+        # --- Отбойники мостика по внешней и внутренней кромке ---
+        spawn_box_on_ground("Catwalk_Rail_Отбойник_{0}_Outer".format(side_name),
+                            0.0, cy + sign_y * (catwalk_half_wid - 10.0),
+                            catwalk_top, 6.5, 0.2, 0.5)
+        spawn_box_on_ground("Catwalk_Rail_Отбойник_{0}_Inner".format(side_name),
+                            0.0, cy - sign_y * (catwalk_half_wid - 10.0),
+                            catwalk_top, 6.5, 0.2, 0.5)
 
-print("\nПолная синхронизация завершена успешно!")
+        # --- Подвесы мостика к балкам каркаса ---
+        for hx in (-280.0, 0.0, 280.0):
+            spawn_beam("Catwalk_Hanger_Подвес_{0}_{1}".format(side_name, int(hx)),
+                       hx, cy, catwalk_top + 120.0, 0.16, 0.16, 2.4)
+
+        # --- Прямые лестничные марши: ровно 6 ступеней с каждой стороны ---
+        for sign_x in (1.0, -1.0):
+            flight_name = "East" if sign_x > 0.0 else "West"
+            for step_index in range(1, 7):
+                step_top = z0 + JUMP_STEP * step_index
+                # 6-я ступень примыкает к торцу мостика, 1-я — у пола цеха
+                step_x = sign_x * (catwalk_half_len + 35.0 + 70.0 * (6 - step_index))
+
+                spawn_plate(
+                    "Stair_Ступень_{0}_{1}_{2}".format(side_name, flight_name, step_index),
+                    step_x, cy, step_top, 0.7, 2.2, PLATE_THICKNESS
+                )
+
+                # Вертикальная стойка-косоур под ступенью (строго вертикальная опора)
+                post_height = (JUMP_STEP * step_index) - (PLATE_THICKNESS * 100.0)
+                if post_height > 5.0:
+                    spawn_beam(
+                        "Stair_Post_Опора_{0}_{1}_{2}".format(side_name, flight_name, step_index),
+                        step_x, cy, z0 + post_height * 0.5,
+                        0.18, 0.18, post_height / 100.0
+                    )
+
+            # --- Площадка примыкания лестницы к полу цеха ---
+            spawn_plate(
+                "Stair_Landing_Площадка_{0}_{1}".format(side_name, flight_name),
+                sign_x * (catwalk_half_len + 35.0 + 70.0 * 6 + 110.0), cy,
+                z0 + JUMP_STEP, 2.0, 2.4, PLATE_THICKNESS
+            )
+
+
+# -----------------------------------------------------------------------------
+# ЯРУС 3: КОНСОЛЬНЫЕ ПЛОЩАДКИ (НЕПРЕРЫВНЫЙ ПАРКУРНЫЙ ПОДЪЁМ, ШАГ 48 СМ)
+# -----------------------------------------------------------------------------
+def build_tier_3_consoles(z0):
+    """
+    Две зеркальные спирали консолей. Каждая стартует у торца своего мостика
+    (Z + 288) и поднимается ровно по 48 см до Z + 672, откуда следует
+    последний шаг 48 см на платформу мостового крана (Z + 720).
+    """
+    start_angle = 60.0
+    angle_step = 24.0
+    start_radius = 870.0
+    end_radius = 600.0
+    count = 8
+
+    chains = [("East", 0.0, "North"), ("West", 180.0, "South")]
+
+    for (chain_name, angle_offset, origin_name) in chains:
+        for i in range(count):
+            angle_deg = start_angle - angle_step * i + angle_offset
+            radius = start_radius - (start_radius - end_radius) * (i / float(count - 1))
+            angle_rad = math.radians(angle_deg)
+
+            px = radius * math.cos(angle_rad)
+            py = radius * math.sin(angle_rad)
+            top_z = z0 + 288.0 + JUMP_STEP * (i + 1)
+
+            # Разворот площадки лицом к центру шахты — строго по Yaw
+            plate_yaw = angle_deg + 90.0
+
+            spawn_plate(
+                "Console_Консоль_{0}_{1}_От_{2}".format(chain_name, i + 1, origin_name),
+                px, py, top_z, 2.0, 2.0, PLATE_THICKNESS, plate_yaw
+            )
+
+            # Кронштейн-подвес консоли (вертикальный, без наклона)
+            spawn_beam(
+                "Console_Bracket_Кронштейн_{0}_{1}".format(chain_name, i + 1),
+                px, py, top_z - 90.0, 0.2, 0.2, 1.6, plate_yaw
+            )
+
+            # Отбойник по внешней кромке консоли (не мешает прыжку внутрь)
+            outer_x = (radius + 90.0) * math.cos(angle_rad)
+            outer_y = (radius + 90.0) * math.sin(angle_rad)
+            spawn_box_on_ground(
+                "Console_Guard_Отбойник_{0}_{1}".format(chain_name, i + 1),
+                outer_x, outer_y, top_z, 0.2, 2.0, 0.5, plate_yaw
+            )
+
+
+# -----------------------------------------------------------------------------
+# ЯРУС 4: ПЛАТФОРМА МОСТОВОГО КРАНА / ВЕРШИНА РЕАКТОРА
+# -----------------------------------------------------------------------------
+def build_tier_4_crane_deck(z0):
+    deck_top = z0 + 720.0
+
+    # --- Центральная площадка финальной дуэли (1000 x 800 x 25) ---
+    spawn_plate("CraneDeck_Платформа_Финальной_Дуэли",
+                0.0, 0.0, deck_top, 10.0, 8.0, TOP_THICKNESS)
+
+    # --- Усиливающие рёбра снизу площадки ---
+    spawn_beam("CraneDeck_Ребро_Продольное_1", 0.0, 250.0, deck_top - 45.0, 10.0, 0.4, 0.4)
+    spawn_beam("CraneDeck_Ребро_Продольное_2", 0.0, -250.0, deck_top - 45.0, 10.0, 0.4, 0.4)
+    spawn_beam("CraneDeck_Ребро_Поперечное_1", 350.0, 0.0, deck_top - 45.0, 0.4, 8.0, 0.4)
+    spawn_beam("CraneDeck_Ребро_Поперечное_2", -350.0, 0.0, deck_top - 45.0, 0.4, 8.0, 0.4)
+
+    # --- Индустриальные отбойники (высота 50 см, толщина 20 см) ---
+    # Проходы оставлены строго напротив точек выхода паркурных спиралей.
+    spawn_box_on_ground("CraneDeck_Отбойник_North_1", -220.0, 390.0, deck_top, 5.6, 0.2, 0.5)
+    spawn_box_on_ground("CraneDeck_Отбойник_North_2", 405.0, 390.0, deck_top, 1.9, 0.2, 0.5)
+    spawn_box_on_ground("CraneDeck_Отбойник_South_1", 220.0, -390.0, deck_top, 5.6, 0.2, 0.5)
+    spawn_box_on_ground("CraneDeck_Отбойник_South_2", -405.0, -390.0, deck_top, 1.9, 0.2, 0.5)
+    spawn_box_on_ground("CraneDeck_Отбойник_East", 490.0, 0.0, deck_top, 0.2, 8.0, 0.5)
+    spawn_box_on_ground("CraneDeck_Отбойник_West", -490.0, 0.0, deck_top, 0.2, 8.0, 0.5)
+
+    # --- 2 стальных контейнера-укрытия на верхнем ринге ---
+    spawn_box_on_ground("CraneDeck_Контейнер_Укрытие_1", -260.0, 160.0, deck_top, 2.4, 1.2, 1.4)
+    spawn_box_on_ground("CraneDeck_Контейнер_Укрытие_2", 260.0, -160.0, deck_top, 2.4, 1.2, 1.4)
+
+    # --- Прыжковые тумбы 48 см для контрприёмов на верхнем ринге ---
+    spawn_box_on_ground("CraneDeck_Тумба_1", 300.0, 250.0, deck_top, 1.4, 1.4, JUMP_STEP / 100.0)
+    spawn_box_on_ground("CraneDeck_Тумба_2", -300.0, -250.0, deck_top, 1.4, 1.4, JUMP_STEP / 100.0)
+
+    # --- Венчающее кольцо реактора под платформой ---
+    spawn_cylinder("Reactor_Ring_Кольцо_Ядра_Верхнее", 0.0, 0.0, deck_top - 90.0, 7.6, 7.6, 0.4)
+
+
+# -----------------------------------------------------------------------------
+# ГЛАВНАЯ ТОЧКА ВХОДА
+# -----------------------------------------------------------------------------
+def build_arena():
+    if CUBE_MESH is None or CYLINDER_MESH is None:
+        unreal.log_error("[ARENA] Не удалось загрузить базовые меши /Engine/BasicShapes. Генерация прервана.")
+        return
+
+    del SPAWNED_ACTORS[:]
+
+    target_z = resolve_target_z_and_cleanup()
+
+    build_tier_1_foundry(target_z)
+    build_factory_frame(target_z)
+    build_tier_2_catwalks(target_z)
+    build_tier_3_consoles(target_z)
+    build_tier_4_crane_deck(target_z)
+
+    unreal.log("=" * 68)
+    unreal.log("[ARENA] ГЕНЕРАЦИЯ ЗАВЕРШЕНА")
+    unreal.log("[ARENA] target_z .................. {0}".format(target_z))
+    unreal.log("[ARENA] Ярус 1 (пол цеха) ......... Z = {0}".format(target_z))
+    unreal.log("[ARENA] Ярус 2 (мостики) .......... Z = {0}".format(target_z + 288.0))
+    unreal.log("[ARENA] Ярус 3 (консоли) .......... Z = {0} .. {1}".format(target_z + 336.0, target_z + 672.0))
+    unreal.log("[ARENA] Ярус 4 (мостовой кран) .... Z = {0}".format(target_z + 720.0))
+    unreal.log("[ARENA] Создано акторов ........... {0}".format(len(SPAWNED_ACTORS)))
+    unreal.log("[ARENA] Папка аутлайнера .......... {0}".format(FOLDER_NAME))
+    unreal.log("=" * 68)
+
+
+build_arena()
