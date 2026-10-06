@@ -41,8 +41,15 @@ COFFEE_BLACKLIST = [
     "круассан", "сосиска", "датская", "кремибон", "макарон", "десерт", "напиток",
 ]
 
+# Внутренние системные номера (5+ цифр после слова "букет").
 BOUQUET_SYSTEM_NUMBER = re.compile(r"букет\s*\d{5,}", re.IGNORECASE)
-BOUQUET_TECH_TEMPLATE = re.compile(r"^\d{4}\s*\(\d+\)$")
+
+# Технические названия индивидуальных сборок: только префикс + номер/дата,
+# например "3002", "Букет 0905", "Букет 1703 (1)", "Букет 11—12", "24.004", "Букет4014".
+BOUQUET_TECH_TEMPLATE = re.compile(
+    r"^(?:букет|композиция|корзина|сумка)?\s*[\d.\-—–/]+(?:\s*\(\d+\))?\s*$",
+    re.IGNORECASE,
+)
 
 # Порядок важен: первое совпадение побеждает.
 FOLDER_RULES = [
@@ -399,7 +406,27 @@ class PosifloraClient(HttpClient):
         return rows, included
 
     def get_bouquet_details(self, bouquet_id):
-        body = self.request("GET", "/bouquets/" + str(bouquet_id), params={"include": "prices,logo"})
+        # Posiflora отклоняет include=prices для /bouquets/{id} (HTTP 422),
+        # поэтому запрашиваем только logo, а при отказе - вообще без include.
+        path = "/bouquets/" + str(bouquet_id)
+        body = None
+        for include in ("logo", None):
+            if include:
+                params = {"include": include}
+            else:
+                params = None
+            try:
+                body = self.request("GET", path, params=params)
+                break
+            except ApiError as exc:
+                LOG.warning(
+                    "Posiflora: детали букета %s (include=%s) недоступны: %s",
+                    bouquet_id, include, exc,
+                )
+
+        if body is None:
+            return {"price": 0.0, "image_url": ""}
+
         row = safe_get(body, "data", default={})
         if not isinstance(row, dict):
             row = {}
