@@ -208,7 +208,7 @@ def create_ms_product(title, ext_id, folder_href, price_rub, logo_id=None):
         print(f"      [!] Ошибка создания {title} в МС: {cr.text}")
     return None
 
-print("\n5. Сбор витринных букетов из Posiflora (в обход бага API)...")
+print("\n5. Сбор витринных букетов из Posiflora...")
 pos_showcase_bare = []
 page = 1
 while True:
@@ -239,7 +239,6 @@ print("\n6. Автосоздание новых витринных букето�
 for item in pos_showcase_bare:
     n_n = norm_name(item["title"])
     if item["id"] not in ms_ext_codes and n_n not in ms_names:
-        print(f"  [+] Найден новый витринный букет: {item['title']}. Запрашиваем детали...")
         price_val = 0
         logo_id = None
         
@@ -263,7 +262,13 @@ for item in pos_showcase_bare:
                     logo_id = str(logo_rel.get("id"))
         except Exception as e:
             print(f"      [!] Ошибка получения деталей: {e}")
-            
+
+        # ==== ФИЛЬТР ОТ МУСОРА ====
+        if price_val <= 0:
+            print(f"  [-] Пропуск мусорного букета (цена 0): {item['title']}")
+            continue
+
+        print(f"  [+] Создаем витринный букет: {item['title']} (Цена: {price_val} руб)")
         p = create_ms_product(item["title"], item["id"], folder_map.get("витрина"), price_val, logo_id)
         if p:
             ms_products.append({"id": p["id"], "name": item["title"], "external_code": item["id"], "href": p["meta"]["href"], "type": "product", "folder_href": folder_map.get("витрина"), "price": int(price_val * 100), "stock": 0.0})
@@ -301,7 +306,6 @@ while True:
 for item in pos_recipes_bare:
     n_n = norm_name(item["title"])
     if item["id"] not in ms_ext_codes and n_n not in ms_names:
-        print(f"  [+] Найден новый рецепт: {item['title']}. Запрашиваем детали...")
         price_val = 0
         logo_id = None
         try:
@@ -323,7 +327,12 @@ for item in pos_recipes_bare:
                     logo_id = str(logo_rel.get("id"))
         except Exception:
             pass
+
+        # ==== ФИЛЬТР ОТ МУСОРА ====
+        if price_val <= 0:
+            continue
             
+        print(f"  [+] Создаем рецепт: {item['title']} (Цена: {price_val} руб)")
         p = create_ms_product(item["title"], item["id"], folder_map.get("авторские"), price_val, logo_id)
         if p:
             ms_products.append({"id": p["id"], "name": item["title"], "external_code": item["id"], "href": p["meta"]["href"], "type": "product", "folder_href": folder_map.get("авторские"), "price": int(price_val * 100), "stock": 0.0})
