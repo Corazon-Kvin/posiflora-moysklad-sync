@@ -57,9 +57,9 @@ pos_s.headers.update({"Authorization": f"Bearer {resp.json()['data']['attributes
 ms_s = requests.Session()
 ms_s.headers.update({"Authorization": f"Bearer {MOYSKLAD_TOKEN.strip()}", "Content-Type": "application/json"})
 
-# 2. Сканирование папок МоегоСклада и создание карты категорий
-print("\n2. Сканирование папок категорий МоегоСклада...")
-folder_map = {}  # "свечи" -> href, "вазы" -> href, etc.
+# 2. Сканирование существующих папок в МоемСкладе
+print("\n2. Сканирование структуры папок МоегоСклада...")
+folder_map = {}
 default_flower_folder = None
 default_decor_folder = None
 
@@ -68,7 +68,8 @@ while True:
     try:
         rf = ms_s.get(f"{MOYSKLAD_URL}/entity/productfolder?limit=100&offset={offset}", timeout=30).json()
         f_rows = rf.get("rows", [])
-        if not f_rows: break
+        if not f_rows:
+            break
         for f in f_rows:
             f_name = f.get("name", "").strip().lower()
             f_href = f["meta"]["href"]
@@ -82,23 +83,32 @@ while True:
             elif f_name == "декор":
                 default_decor_folder = f_href
         offset += len(f_rows)
-        if len(f_rows) < 100: break
+        if len(f_rows) < 100:
+            break
     except Exception as e:
         print(f"[!] Ошибка сканирования папок: {e}")
         break
 
 def get_folder_href_for_item(name, category_name=""):
-    """Определяет подходящую папку МоегоСклада по имени или категории Posiflora"""
     search_text = f"{name} {category_name}".lower()
-    if "витрин" in search_text: return folder_map.get("витрина")
-    if "свеч" in search_text: return folder_map.get("свечи", default_decor_folder)
-    if "ваз" in search_text: return folder_map.get("вазы", default_decor_folder)
-    if "подсвечник" in search_text: return folder_map.get("подсвечники", default_decor_folder)
-    if "шар" in search_text: return folder_map.get("шары", default_decor_folder)
-    if "открытк" in search_text or "конверт" in search_text: return folder_map.get("открытки", default_decor_folder)
-    if "коробк" in search_text: return folder_map.get("подарочные коробки", default_decor_folder)
-    if "игрушк" in search_text: return folder_map.get("игрушки", default_decor_folder)
-    if "лент" in search_text or "упаковк" in search_text or "пленк" in search_text: return folder_map.get("упаковка", default_decor_folder)
+    if "витрин" in search_text:
+        return folder_map.get("витрина")
+    if "свеч" in search_text:
+        return folder_map.get("свечи", default_decor_folder)
+    if "ваз" in search_text:
+        return folder_map.get("вазы", default_decor_folder)
+    if "подсвечник" in search_text:
+        return folder_map.get("подсвечники", default_decor_folder)
+    if "шар" in search_text:
+        return folder_map.get("шары", default_decor_folder)
+    if "открытк" in search_text or "конверт" in search_text:
+        return folder_map.get("открытки", default_decor_folder)
+    if "коробк" in search_text:
+        return folder_map.get("подарочные коробки", default_decor_folder)
+    if "игрушк" in search_text:
+        return folder_map.get("игрушки", default_decor_folder)
+    if "лент" in search_text or "упаковк" in search_text or "пленк" in search_text:
+        return folder_map.get("упаковка", default_decor_folder)
     return default_flower_folder or default_decor_folder
 
 # 3. Сбор витринных букетов Posiflora (/showcases)
@@ -108,10 +118,12 @@ page = 1
 while True:
     try:
         r = pos_s.get(f"{POSIFLORA_URL}/showcases?page[number]={page}&page[size]=100&include=logo,prices", timeout=30)
-        if r.status_code != 200: break
+        if r.status_code != 200:
+            break
         d = r.json()
         items = d.get("data", [])
-        if not items: break
+        if not items:
+            break
 
         inc_map = {(inc.get("type"), str(inc.get("id"))): inc for inc in d.get("included", [])}
         for it in items:
@@ -123,11 +135,16 @@ while True:
                 if pr_obj:
                     price_val = float(pr_obj.get("attributes", {}).get("value", 0))
                     break
-            logo_id = it.get("relationships", {}).get("logo", {}).get("data", {}).get("id") if it.get("relationships", {}).get("logo", {}).get("data") else None
+            logo_id = None
+            logo_rel = it.get("relationships", {}).get("logo", {}).get("data")
+            if logo_rel and logo_rel.get("id"):
+                logo_id = str(logo_rel["id"])
             pos_showcase.append({"id": it_id, "title": title, "price": price_val, "logo_id": logo_id})
-        if len(items) < 100: break
+        if len(items) < 100:
+            break
         page += 1
-    except Exception: break
+    except Exception:
+        break
 
 # 4. Сбор авторских букетов Posiflora (/recipes)
 print("\n4. Сбор рецептов авторских букетов из Posiflora...")
@@ -136,82 +153,11 @@ page = 1
 while True:
     try:
         r = pos_s.get(f"{POSIFLORA_URL}/recipes?page[number]={page}&page[size]=100&include=logo,prices", timeout=30)
-        if r.status_code != 200: break
+        if r.status_code != 200:
+            break
         d = r.json()
         items = d.get("data", [])
-        if not items: break
+        if not items:
+            break
 
-        inc_map = {(inc.get("type"), str(inc.get("id"))): inc for inc in d.get("included", [])}
-        for it in items:
-            title = it.get("attributes", {}).get("title", "").strip()
-            it_id = str(it.get("id"))
-            price_val = 0
-            for pr_rel in it.get("relationships", {}).get("prices", {}).get("data", []):
-                pr_obj = inc_map.get(("prices", str(pr_rel.get("id"))))
-                if pr_obj:
-                    price_val = float(pr_obj.get("attributes", {}).get("value", 0))
-                    break
-            logo_id = it.get("relationships", {}).get("logo", {}).get("data", {}).get("id") if it.get("relationships", {}).get("logo", {}).get("data") else None
-            pos_recipes.append({"id": it_id, "title": title, "price": price_val, "logo_id": logo_id})
-        if len(items) < 100: break
-        page += 1
-    except Exception: break
-
-# 5. Сбор штучных товаров Posiflora (/inventory-items)
-print("\n5. Сбор штучных товаров и декора из Posiflora...")
-pos_inventory = []
-page = 1
-while True:
-    try:
-        r = pos_s.get(f"{POSIFLORA_URL}/inventory-items?page[number]={page}&page[size]=100&include=category,logo,prices", timeout=30)
-        if r.status_code != 200: break
-        d = r.json()
-        items = d.get("data", [])
-        if not items: break
-
-        inc_map = {(inc.get("type"), str(inc.get("id"))): inc for inc in d.get("included", [])}
-        for it in items:
-            title = it.get("attributes", {}).get("title", "").strip()
-            it_id = str(it.get("id"))
-            cat_name = ""
-            cat_rel = it.get("relationships", {}).get("category", {}).get("data")
-            if cat_rel and cat_rel.get("id"):
-                cat_obj = inc_map.get(("categories", str(cat_rel["id"])))
-                if cat_obj: cat_name = cat_obj.get("attributes", {}).get("title", "")
-
-            price_val = 0
-            for pr_rel in it.get("relationships", {}).get("prices", {}).get("data", []):
-                pr_obj = inc_map.get(("prices", str(pr_rel.get("id"))))
-                if pr_obj:
-                    price_val = float(pr_obj.get("attributes", {}).get("value", 0))
-                    break
-
-            logo_id = it.get("relationships", {}).get("logo", {}).get("data", {}).get("id") if it.get("relationships", {}).get("logo", {}).get("data") else None
-            pos_inventory.append({"id": it_id, "title": title, "category": cat_name, "price": price_val, "logo_id": logo_id})
-        if len(items) < 100: break
-        page += 1
-    except Exception: break
-
-# 6. Сбор срезки Posiflora (/catalog)
-print("\n6. Сбор срезки из каталога Posiflora...")
-pos_flowers = {}
-page = 1
-while True:
-    try:
-        params = {"page[number]": page, "page[size]": 100, "include": "balances", "distribution": "true", "concealment": "false"}
-        r = pos_s.get(f"{POSIFLORA_URL}/catalog", params=params, timeout=30)
-        if r.status_code != 200: break
-        d = r.json()
-        items = d.get("data", [])
-        if not items: break
-
-        bal_map = {}
-        for inc in d.get("included", []):
-            if inc.get("type") == "item-balances":
-                attrs = inc.get("attributes", {})
-                bal_map[str(inc.get("id"))] = max(float(attrs.get("qtyOnWindow") or 0), float(attrs.get("qty") or 0))
-
-        for it in items:
-            title = str(it.get("attributes", {}).get("title") or "").strip()
-            it_id = str(it.get("id"))
-            st = 0
+        inc_map = {(inc.get("type"), str(inc.get("id"))): inc
