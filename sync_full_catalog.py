@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 # Односторонняя синхронизация каталога и остатков: Posiflora -> МойСклад.
-# Запуск: python sync_posiflora_moysklad.py (GitHub Actions, cron каждые 10-15 минут).
-# Зависимости: requests, Pillow (остальное - стандартная библиотека Python).
+# Запуск: python sync_full_catalog.py (GitHub Actions, cron каждые 10-15 минут).
+# Зависимости: requests, Pillow.
 
 import base64
 import io
@@ -40,16 +40,6 @@ COFFEE_BLACKLIST = [
     "эклер", "тарталет", "кофе", "сырник", "чиабатта", "багет", "булочк",
     "круассан", "сосиска", "датская", "кремибон", "макарон", "десерт", "напиток",
 ]
-
-# Внутренние системные номера (5+ цифр после слова "букет").
-BOUQUET_SYSTEM_NUMBER = re.compile(r"букет\s*\d{5,}", re.IGNORECASE)
-
-# Технические названия индивидуальных сборок: только префикс + номер/дата,
-# например "3002", "Букет 0905", "Букет 1703 (1)", "Букет 11—12", "24.004", "Букет4014".
-BOUQUET_TECH_TEMPLATE = re.compile(
-    r"^(?:букет|композиция|корзина|сумка)?\s*[\d.\-—–/]+(?:\s*\(\d+\))?\s*$",
-    re.IGNORECASE,
-)
 
 # Порядок важен: первое совпадение побеждает.
 FOLDER_RULES = [
@@ -406,8 +396,6 @@ class PosifloraClient(HttpClient):
         return rows, included
 
     def get_bouquet_details(self, bouquet_id):
-        # Posiflora отклоняет include=prices для /bouquets/{id} (HTTP 422),
-        # поэтому запрашиваем только logo, а при отказе - вообще без include.
         path = "/bouquets/" + str(bouquet_id)
         body = None
         for include in ("logo", None):
@@ -633,12 +621,16 @@ def is_valid_bouquet(name, price):
         return False
     if price <= 0:
         return False
-    if BOUQUET_SYSTEM_NUMBER.search(name):
+    
+    # ЖЕСТКИЙ БЕЛЫЙ СПИСОК ВИТРИНЫ:
+    # Разрешаем создавать букеты ТОЛЬКО со строгим названием формата "Букет 0603" 
+    # (слово Букет + от 3 до 4 цифр). Любой другой текст флористов блокируется.
+    if not re.match(r'^букет\s*\d{3,4}$', name.strip(), re.IGNORECASE):
         return False
-    if BOUQUET_TECH_TEMPLATE.match(name.strip()):
-        return False
+        
     if is_blacklisted(name):
         return False
+        
     return True
 
 
