@@ -125,7 +125,10 @@ while True:
         if not items:
             break
 
-        inc_map = {(inc.get("type"), str(inc.get("id"))): inc for inc in d.get("included", [])}
+        inc_map = {}
+        for inc in d.get("included", []):
+            inc_map[(inc.get("type"), str(inc.get("id")))] = inc
+
         for it in items:
             title = it.get("attributes", {}).get("title", "").strip()
             it_id = str(it.get("id"))
@@ -160,4 +163,12 @@ while True:
         if not items:
             break
 
-        inc_map = {(inc.get("type"), str(inc.get("id"))): inc
+        inc_map = {}
+        for inc in d.get("included", []):
+            inc_map[(inc.get("type"), str(inc.get("id")))] = inc
+
+        for it in items:
+            title = it.get("attributes", {}).get("title", "").strip()
+            it_id = str(it.get("id"))
+            price_val = 0
+            for pr_rel in it.get("relationships", {}).
