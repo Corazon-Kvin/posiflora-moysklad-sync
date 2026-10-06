@@ -25,9 +25,19 @@ jobs:
 
       - name: Run full catalog sync
         env:
+          # Ваши секретные ключи авторизации
           POSIFLORA_USER: ${{ secrets.POSIFLORA_USER }}
           POSIFLORA_PASS: ${{ secrets.POSIFLORA_PASS }}
           MOYSKLAD_TOKEN: ${{ secrets.MOYSKLAD_TOKEN }}
-          STORE_ID: ${{ secrets.STORE_ID }}
+          
+          # Открытые системные ссылки и ID складов Лакма
+          POSIFLORA_URL: "https://lakmaflowers.posiflora.com/api/v1"
+          POSIFLORA_STORE_ID: "cde3de25-51e3-4193-a164-84cdebd01e94"
+          MOYSKLAD_URL: "https://api.moysklad.ru/api/remap/1.2"
+          TARGET_STORE_ID: "fc24f096-af79-11f1-0a80-0c0a0039483e"
+          ORG_ID: "b34f89b3-c981-11ee-0a80-07770038ef19"
+          
+          # РЕЖИМ ТЕСТИРОВАНИЯ (сбор данных без записи)
+          DRY_RUN: "true"
         run: |
           python sync_full_catalog.py
