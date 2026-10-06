@@ -52,7 +52,12 @@ pos_s.headers.update({"Content-Type": "application/vnd.api+json", "Accept": "app
 resp = pos_s.post(f"{POSIFLORA_URL}/sessions", json={
     "data": {"type": "sessions", "attributes": {"username": POSIFLORA_USER, "password": POSIFLORA_PASS}}
 }, timeout=20)
-pos_s.headers.update({"Authorization": f"Bearer {resp.json()['data']['attributes']['accessToken']}"})
+
+if resp.status_code in (200, 201):
+    pos_s.headers.update({"Authorization": f"Bearer {resp.json()['data']['attributes']['accessToken']}"})
+else:
+    print(f"[-] Ошибка авторизации Posiflora: {resp.status_code}")
+    exit()
 
 ms_s = requests.Session()
 ms_s.headers.update({"Authorization": f"Bearer {MOYSKLAD_TOKEN.strip()}", "Content-Type": "application/json"})
@@ -115,7 +120,7 @@ pos_showcase = []
 page = 1
 while True:
     try:
-        r = pos_s.get(f"{POSIFLORA_URL}/showcases?page[number]={page}&page[size]=100&include=logo,prices", timeout=30)
+        r = pos_s.get(f"{POSIFLORA_URL}/bouquets?page[number]={page}&page[size]=100&include=logo,prices", timeout=30)
         if r.status_code != 200:
             break
         d = r.json()
