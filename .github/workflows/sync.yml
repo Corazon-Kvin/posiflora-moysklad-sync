@@ -25,7 +25,7 @@ jobs:
 
       - name: Run full catalog sync
         env:
-          # Ваши секретные ключи авторизации
+          # Секретные ключи авторизации
           POSIFLORA_USER: ${{ secrets.POSIFLORA_USER }}
           POSIFLORA_PASS: ${{ secrets.POSIFLORA_PASS }}
           MOYSKLAD_TOKEN: ${{ secrets.MOYSKLAD_TOKEN }}
@@ -36,8 +36,5 @@ jobs:
           MOYSKLAD_URL: "https://api.moysklad.ru/api/remap/1.2"
           TARGET_STORE_ID: "fc24f096-af79-11f1-0a80-0c0a0039483e"
           ORG_ID: "b34f89b3-c981-11ee-0a80-07770038ef19"
-          
-          # РЕЖИМ ТЕСТИРОВАНИЯ (сбор данных без записи)
-          DRY_RUN: "true"
         run: |
           python sync_full_catalog.py
