@@ -641,13 +641,31 @@ def fetch_valid_bouquets(posiflora):
     dropped = 0
     for row in rows:
         attrs = row.get("attributes") or {}
+        
+        # --- ФИЛЬТР АКТУАЛЬНОСТИ (ТОЛЬКО В НАЛИЧИИ) ---
+        # Ищем статус букета (в Posiflora это поле status или state)
+        status = str(attrs.get("status") or attrs.get("state") or "").strip().lower()
+        
+        # Блокируем букеты, которые были проданы, разобраны или перенесены в архив
+        if status in ("sold", "disassembled", "archived", "draft", "deleted"):
+            dropped += 1
+            continue
+            
+        # Если статус указан, пропускаем только те, что официально на витрине
+        if status and status not in ("showcase", "active", "published"):
+            dropped += 1
+            continue
+        # ----------------------------------------------
+        
         name = get_title(attrs)
         price = pick_price(attrs)
         if price <= 0:
             price = price_from_included(row, included_index)
+            
         if not is_valid_bouquet(name, price):
             dropped += 1
             continue
+            
         result.append({
             "id": str(row.get("id")),
             "name": name,
@@ -656,7 +674,8 @@ def fetch_valid_bouquets(posiflora):
             "needs_detail": True,
             "require_price": True,
         })
-    LOG.info("Posiflora: витринных букетов %s (отфильтровано %s)", len(result), dropped)
+        
+    LOG.info("Posiflora: витринных букетов %s (отфильтровано %s старых и мусорных)", len(result), dropped)
     return result
 
 
