@@ -636,7 +636,8 @@ def run_creation_phase(ctx):
 # -----------------------------------------------------------------------------
 def fetch_current_stock(ctx):
     store_id = ctx.config["TARGET_STORE_ID"]
-    rows = ctx.moysklad.request("GET", "/report/stock/bystore/current", params={"filter": "storeId=" + store_id}).get("rows", [])
+    body = ctx.moysklad.request("GET", "/report/stock/bystore/current", params={"filter": "storeId=" + store_id})
+    rows = body.get("rows", []) if isinstance(body, dict) else (body if isinstance(body, list) else [])
     stock = {last_segment(safe_get(r, "meta", "href")): safe_float(r.get("stock")) for r in rows if isinstance(r, dict) and r.get("storeId") in (None, store_id) and last_segment(safe_get(r, "meta", "href"))}
     return stock
 
