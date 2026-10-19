@@ -851,8 +851,27 @@ def run_creation_phase(ctx):
 
 
 # -----------------------------------------------------------------------------
-# ОСТАТКИ
+# ОСТАТКИ И АРХИВАЦИЯ СТАРЫХ БУКЕТОВ
 # -----------------------------------------------------------------------------
+def archive_old_showcase_bouquets(ctx):
+    LOG.info("Проверка папки 'Витрина Tilda' на наличие устаревших букетов...")
+    archived_count = 0
+    for entry in ctx.index.items:
+        if entry.get("category") == "showcase" and not entry.get("archived"):
+            code = str(entry.get("code"))
+            name_norm = normalize_name(entry.get("name"))
+            if code not in ctx.active_bouquet_ids and name_norm not in ctx.active_bouquet_names:
+                if not ctx.dry_run:
+                    try:
+                        ctx.moysklad.update_product(entry["id"], {"archived": True})
+                        entry["archived"] = True
+                        archived_count += 1
+                        LOG.info("Отправлен в архив устаревший букет витрины: %s", entry.get("name"))
+                    except Exception as exc:
+                        LOG.error("Ошибка архивации %s: %s", entry.get("name"), exc)
+    LOG.info("Всего отправлено в архив устаревших букетов витрины: %s", archived_count)
+
+
 def fetch_current_stock(ctx):
     store_id = ctx.config["TARGET_STORE_ID"]
     body = ctx.moysklad.request("GET", "/report/stock/bystore/current", params={"filter": "storeId=" + store_id})
@@ -982,6 +1001,7 @@ def main():
         ctx.index = build_product_index(ctx.moysklad.list_entities("/entity/product"), ctx.folder_category)
         load_posiflora_data(ctx)
         run_creation_phase(ctx)
+        archive_old_showcase_bouquets(ctx)
         run_stock_phase(ctx)
         LOG.info("Итоги: %s", ctx.stats)
     except ApiError as exc:
