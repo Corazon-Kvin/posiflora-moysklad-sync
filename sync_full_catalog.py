@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # Односторонняя синхронизация каталога и остатков: Posiflora -> МойСклад.
-# Запуск: python sync_full_catalog.py (GitHub Actions, cron каждые 10-15 минут).
+# Запуск: python sync_full_catalog.py (GitHub Actions, cron каждые 30 минут).
 # Зависимости: requests, Pillow.
 
 import base64
@@ -575,11 +575,8 @@ def fetch_valid_bouquets(posiflora):
         attrs = row.get("attributes") or {}
         status = str(attrs.get("status") or attrs.get("state") or "").strip().lower()
 
-        # Строгий фильтр витрины: отсекаем архив и старые статусы
+        # Отсекаем только явно проданные, разобранные или архивные
         if status in ("sold", "disassembled", "archived", "draft", "deleted", "canceled", "cancelled", "written_off", "write_off"):
-            dropped += 1
-            continue
-        if status and status not in ("showcase", "active", "published", "on_window", "window", "ready"):
             dropped += 1
             continue
 
@@ -609,7 +606,7 @@ def fetch_valid_bouquets(posiflora):
             "require_price": True,
         })
 
-    LOG.info("Posiflora: отобрано строго с витрины %s актуальных букетов (отсеяно архива %s)", len(result), dropped)
+    LOG.info("Posiflora: отобрано с витрины %s букетов (отсеяно архива %s)", len(result), dropped)
     return result
 
 
