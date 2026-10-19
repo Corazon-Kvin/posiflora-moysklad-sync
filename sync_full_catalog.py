@@ -49,11 +49,9 @@ FOLDER_RULES = [
     ("balloon", ["шар"]),
     ("packaging", ["подарочные коробки", "упаковк"]),
     ("decor", ["декор", "игрушк", "подсвечник"]),
-    ("raw", ["сырье", "сырьё"]),
     ("recipes", ["каталог/цветы"]),
 ]
 
-# Единые правила парсинга категорий из Posiflora
 POSIFLORA_CATEGORY_RULES = [
     ("recipes", ["рецепт"]),
     ("author", ["авторски", "композици"]),
@@ -62,15 +60,12 @@ POSIFLORA_CATEGORY_RULES = [
     ("candle", ["свеч"]),
     ("packaging", ["упаковк", "коробк", "лент", "пакет", "открытк"]),
     ("decor", ["декор", "игрушк", "топпер"]),
-    ("raw", ["срезка", "цветок", "цветы", "зелень", "роза", "хризантема", "тюльпан"]),
 ]
 
-# Тип логики остатков по категории папки.
 STOCK_KIND = {
     "showcase": "showcase",
     "author": "author",
     "recipes": "author",
-    "raw": "cut",
     "balloon": "piece",
     "decor": "piece",
     "vase": "piece",
@@ -575,7 +570,6 @@ def fetch_valid_bouquets(posiflora):
         attrs = row.get("attributes") or {}
         status = str(attrs.get("status") or attrs.get("state") or "").strip().lower()
 
-        # Отсекаем только явно проданные, разобранные или архивные
         if status in ("sold", "disassembled", "archived", "draft", "deleted", "canceled", "cancelled", "written_off", "write_off"):
             dropped += 1
             continue
@@ -597,57 +591,18 @@ def fetch_valid_bouquets(posiflora):
 
         image_url = logo_from_included(row, included_index)
 
+        # СТРОГО ПРИНУДИТЕЛЬНО ПРИСВАИВАЕМ КАТЕГОРИЮ ВИРИНЫ TILDA
         result.append({
             "id": str(row.get("id")),
             "name": name,
             "price": price,
             "image_url": image_url,
+            "category": "showcase",
             "needs_detail": not bool(image_url),
             "require_price": True,
         })
 
     LOG.info("Posiflora: отобрано с витрины %s букетов (отсеяно архива %s)", len(result), dropped)
-    return result
-
-
-def fetch_cut_flowers(posiflora):
-    rows, included = posiflora.paginate("/catalog", {"include": "balances,category"})
-    included_index = build_included_index(included)
-    result = []
-    for row in rows:
-        attrs = row.get("attributes") or {}
-        name = get_title(attrs)
-        if not name or is_blacklisted(name):
-            continue
-
-        category_title = ""
-        category_refs = as_ref_list(safe_get(row, "relationships", "category", "data"))
-        for ref in category_refs:
-            category_item = resolve_ref(ref, included_index)
-            if category_item is not None:
-                category_title = get_title(category_item.get("attributes"))
-                break
-
-        cat = match_rules(category_title, POSIFLORA_CATEGORY_RULES) or match_rules(name, POSIFLORA_CATEGORY_RULES) or "raw"
-
-        total = sum(
-            max(
-                safe_float(resolve_ref(r, included_index).get("attributes", {}).get("qtyOnWindow")),
-                safe_float(resolve_ref(r, included_index).get("attributes", {}).get("qty")),
-            )
-            for r in as_ref_list(safe_get(row, "relationships", "balances", "data"))
-            if resolve_ref(r, included_index)
-        )
-        result.append({
-            "id": str(row.get("id")),
-            "name": name,
-            "price": pick_price(attrs),
-            "image_url": logo_from_included(row, included_index),
-            "category": cat,
-            "needs_detail": False,
-            "require_price": False,
-            "qty": max(total, 0.0),
-        })
     return result
 
 
@@ -839,7 +794,7 @@ def process_candidate(ctx, candidate):
 
 
 def run_creation_phase(ctx):
-    for candidate in ctx.bouquet_candidates + ctx.cut_candidates + ctx.inventory_candidates:
+    for candidate in ctx.bouquet_candidates + ctx.inventory_candidates:
         try:
             process_candidate(ctx, candidate)
         except Exception as exc:
@@ -895,9 +850,7 @@ def compute_target(ctx, entry):
         return AUTHOR_STOCK_LIMIT
 
     item = (
-        ctx.cut_by_code.get(str(entry.get("code"))) or ctx.cut_by_name.get(normalize_name(entry.get("name")))
-        if kind == "cut"
-        else ctx.inventory_by_code.get(str(entry.get("code"))) or ctx.inventory_by_name.get(normalize_name(entry.get("name")))
+        ctx.inventory_by_code.get(str(entry.get("code"))) or ctx.inventory_by_name.get(normalize_name(entry.get("name")))
     )
 
     if not item:
@@ -967,11 +920,6 @@ def load_posiflora_data(ctx):
     except ApiError as exc:
         LOG.error("Ошибка загрузки букетов: %s", exc)
     try:
-        ctx.cut_candidates = fetch_cut_flowers(ctx.posiflora)
-        ctx.cut_loaded = True
-    except ApiError as exc:
-        LOG.error("Ошибка загрузки срезки: %s", exc)
-    try:
         ctx.inventory_candidates = fetch_inventory_items(ctx.posiflora)
         ctx.inventory_loaded = True
     except ApiError as exc:
@@ -979,8 +927,6 @@ def load_posiflora_data(ctx):
 
     ctx.active_bouquet_ids = {str(c["id"]) for c in ctx.bouquet_candidates}
     ctx.active_bouquet_names = {normalize_name(c["name"]) for c in ctx.bouquet_candidates}
-    ctx.cut_by_code = {str(c["id"]): c for c in ctx.cut_candidates}
-    ctx.cut_by_name = {normalize_name(c["name"]): c for c in ctx.cut_candidates}
     ctx.inventory_by_code = {str(c["id"]): c for c in ctx.inventory_candidates}
     ctx.inventory_by_name = {normalize_name(c["name"]): c for c in ctx.inventory_candidates}
 
