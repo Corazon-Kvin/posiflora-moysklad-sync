@@ -382,7 +382,7 @@ class PosifloraClient(HttpClient):
     def get_bouquet_details(self, bouquet_id):
         path = "/bouquets/" + str(bouquet_id)
         body = None
-        for include in ("logo,prices", "logo", None):
+        for include in ("logo", None):
             try:
                 body = self.request("GET", path, params={"include": include} if include else None)
                 break
@@ -562,53 +562,54 @@ def is_valid_bouquet_name(name):
 
 
 def fetch_valid_bouquets(posiflora):
-    # Пробуем загрузить с include=logo,prices, если API отклонит - без include
     try:
-        rows, included = posiflora.paginate("/bouquets", {"include": "logo"})
+        rows, included = posiflora.paginate("/bouquets", {"include": "logo,prices"})
     except ApiError:
         rows, included = posiflora.paginate("/bouquets")
 
     included_index = build_included_index(included)
     result = []
-    dropped_status = 0
-    dropped_name = 0
+    dropped = 0
 
     for row in rows:
         attrs = row.get("attributes") or {}
         status = str(attrs.get("status") or attrs.get("state") or "").strip().lower()
 
-        # Отсекаем проданные, списанные и архивные букеты
+        # Строгий фильтр витрины: отсекаем архив и старые статусы
         if status in ("sold", "disassembled", "archived", "draft", "deleted", "canceled", "cancelled", "written_off", "write_off"):
-            dropped_status += 1
+            dropped += 1
+            continue
+        if status and status not in ("showcase", "active", "published", "on_window", "window", "ready"):
+            dropped += 1
             continue
 
         name = get_title(attrs)
-        # Если в Posiflora название записано просто как "1901", приводим к "Букет 1901"
         if re.match(r"^\d{3,4}$", name.strip()):
             name = "Букет " + name.strip()
 
         if not is_valid_bouquet_name(name):
-            dropped_name += 1
+            dropped += 1
             continue
 
         price = pick_price(attrs)
         if price <= 0:
             price = price_from_included(row, included_index)
+        if price <= 0:
+            dropped += 1
+            continue
+
+        image_url = logo_from_included(row, included_index)
 
         result.append({
             "id": str(row.get("id")),
             "name": name,
             "price": price,
-            "image_url": logo_from_included(row, included_index),
-            "category": "showcase",
-            "needs_detail": True,
+            "image_url": image_url,
+            "needs_detail": not bool(image_url),
             "require_price": True,
         })
 
-    LOG.info(
-        "Posiflora: кандидатов букетов витрины %s (отсеяно по статусу=%s, по имени=%s)",
-        len(result), dropped_status, dropped_name,
-    )
+    LOG.info("Posiflora: отобрано строго с витрины %s актуальных букетов (отсеяно архива %s)", len(result), dropped)
     return result
 
 
@@ -753,7 +754,6 @@ def process_candidate(ctx, candidate):
             image_url = details["image_url"]
 
     if candidate.get("require_price") and price <= 0:
-        LOG.info("Пропуск букета без цены: %s (id=%s)", name, source_id)
         return
 
     folder_meta = ctx.folder_meta.get(category)
@@ -768,24 +768,18 @@ def process_candidate(ctx, candidate):
         update_payload = {}
         is_reused_bouquet = (category == "showcase" and str(existing.get("code")) != source_id)
 
-        # 1. Если карточка найдена по старому имени (например, старый "Букет 1901"),
-        # обновляем externalCode на новый ID букета из Posiflora
         if is_reused_bouquet:
             update_payload["externalCode"] = source_id
 
-        # 2. Если товар в архиве — разархивируем
         if existing.get("archived"):
             update_payload["archived"] = False
 
-        # 3. Проверка папки
         if existing.get("category") != category:
             update_payload["productFolder"] = {"meta": folder_meta}
 
-        # 4. Проверка имени
         if existing["name"] != name:
             update_payload["name"] = name[:PRODUCT_NAME_LIMIT]
 
-        # 5. Обновление цены (для витрины или если цена изменилась)
         if price_kopecks > 0 and (is_reused_bouquet or existing.get("price_kopecks") != price_kopecks):
             update_payload["salePrices"] = [{"value": price_kopecks, "priceType": {"meta": ctx.price_type_meta}}]
 
@@ -803,7 +797,6 @@ def process_candidate(ctx, candidate):
             except Exception as exc:
                 LOG.error("Ошибка при обновлении товара %s: %s", name, exc)
 
-        # 6. Загрузка фото (если фото нет ИЛИ если это переиспользованный номер букета с новым составом)
         need_photo = (not existing.get("has_image")) or is_reused_bouquet
         if need_photo and image_url and not ctx.dry_run:
             try:
