@@ -40,7 +40,6 @@ COFFEE_BLACKLIST = [
     "круассан", "сосиска", "датская", "кремибон", "макарон", "десерт", "напиток",
 ]
 
-# Точное сопоставление папок МоегоСклада (исключаем корень "Цветы лакма")
 FOLDER_RULES = [
     ("showcase", ["витрина tilda", "витрина"]),
     ("author", ["авторские букеты", "авторские"]),
@@ -58,7 +57,7 @@ POSIFLORA_CATEGORY_RULES = [
     ("balloon", ["шар", "гелий"]),
     ("vase", ["ваз"]),
     ("candle", ["свеч"]),
-    ("packaging", ["упаковк", "коробк", "лент", "пакет", "открытк"]),
+    ("packaging", ["подарочник", "упаковк", "коробк", "лент", "пакет", "открытк"]),
     ("decor", ["декор", "игрушк", "топпер"]),
 ]
 
@@ -591,14 +590,13 @@ def fetch_valid_bouquets(posiflora):
 
         image_url = logo_from_included(row, included_index)
 
-        # СТРОГО ПРИНУДИТЕЛЬНО ПРИСВАИВАЕМ КАТЕГОРИЮ ВИРИНЫ TILDA
         result.append({
             "id": str(row.get("id")),
             "name": name,
             "price": price,
             "image_url": image_url,
             "category": "showcase",
-            "needs_detail": not bool(image_url),
+            "needs_detail": True,  # Всегда запрашиваем детали для проверки свежего фото
             "require_price": True,
         })
 
@@ -676,10 +674,10 @@ class AppContext:
         self.folder_meta = {}
         self.posiflora = self.moysklad = self.index = self.price_type_meta = None
         self.dry_run = False
-        self.bouquet_candidates = self.cut_candidates = self.inventory_candidates = []
-        self.bouquets_loaded = self.cut_loaded = self.inventory_loaded = False
+        self.bouquet_candidates = self.inventory_candidates = []
+        self.bouquets_loaded = False
         self.active_bouquet_ids, self.active_bouquet_names = set(), set()
-        self.cut_by_code, self.cut_by_name, self.inventory_by_code, self.inventory_by_name = {}, {}, {}, {}
+        self.inventory_by_code, self.inventory_by_name = {}, {}
 
 
 def load_config():
@@ -749,6 +747,7 @@ def process_candidate(ctx, candidate):
             except Exception as exc:
                 LOG.error("Ошибка при обновлении товара %s: %s", name, exc)
 
+        # Гарантированная дозагрузка фото, если его не было
         need_photo = (not existing.get("has_image")) or is_reused_bouquet
         if need_photo and image_url and not ctx.dry_run:
             try:
@@ -812,6 +811,7 @@ def archive_old_showcase_bouquets(ctx):
         if entry.get("category") == "showcase" and not entry.get("archived"):
             code = str(entry.get("code"))
             name_norm = normalize_name(entry.get("name"))
+            # Проверяем как по ID (externalCode), так и по точному имени (например, Букет 1607)
             if code not in ctx.active_bouquet_ids and name_norm not in ctx.active_bouquet_names:
                 if not ctx.dry_run:
                     try:
@@ -921,7 +921,6 @@ def load_posiflora_data(ctx):
         LOG.error("Ошибка загрузки букетов: %s", exc)
     try:
         ctx.inventory_candidates = fetch_inventory_items(ctx.posiflora)
-        ctx.inventory_loaded = True
     except ApiError as exc:
         LOG.error("Ошибка загрузки инвентаря: %s", exc)
 
