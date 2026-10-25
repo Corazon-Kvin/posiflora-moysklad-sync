@@ -339,11 +339,11 @@ class PosifloraClient(HttpClient):
             return False
         return True
 
-    def paginate(self, path, params=None, page_size=100):
+    def paginate(self, path, params=None, page_size=100, max_pages=MAX_PAGES):
         base_params = dict(params or {})
         rows, included, seen = [], [], set()
         page = 1
-        while page <= MAX_PAGES:
+        while page <= max_pages:
             page_params = dict(base_params)
             page_params["page[number]"] = page
             page_params["page[size]"] = page_size
@@ -556,10 +556,11 @@ def is_valid_bouquet_name(name):
 
 
 def fetch_valid_bouquets(posiflora):
+    # Ограничиваем запрос до 10 страниц (1000 букетов), чтобы не качать весь архив
     try:
-        rows, included = posiflora.paginate("/bouquets", {"include": "logo,prices"})
+        rows, included = posiflora.paginate("/bouquets", {"include": "logo,prices"}, max_pages=10)
     except ApiError:
-        rows, included = posiflora.paginate("/bouquets")
+        rows, included = posiflora.paginate("/bouquets", max_pages=10)
 
     included_index = build_included_index(included)
     result = []
@@ -596,11 +597,11 @@ def fetch_valid_bouquets(posiflora):
             "price": price,
             "image_url": image_url,
             "category": "showcase",
-            "needs_detail": True,  # Всегда запрашиваем детали для проверки свежего фото
+            "needs_detail": True,
             "require_price": True,
         })
 
-    LOG.info("Posiflora: отобрано с витрины %s букетов (отсеяно архива %s)", len(result), dropped)
+    LOG.info("Posiflora: отобрано с витрины %s букетов (отсеяно %s)", len(result), dropped)
     return result
 
 
@@ -747,9 +748,8 @@ def process_candidate(ctx, candidate):
             except Exception as exc:
                 LOG.error("Ошибка при обновлении товара %s: %s", name, exc)
 
-        # Гарантированная дозагрузка фото, если его не было
         need_photo = (not existing.get("has_image")) or is_reused_bouquet
-        if need_photo and image_url and not ctx.dry_run:
+        if need_photo and image_url and "placeholder" not in image_url.lower() and not ctx.dry_run:
             try:
                 content = download_and_prepare_image(image_url, ctx.config["POSIFLORA_URL"])
                 ctx.moysklad.upload_image(existing["id"], str(source_id) + ".jpg", content)
@@ -782,7 +782,7 @@ def process_candidate(ctx, candidate):
     ctx.stats["created"] += 1
     LOG.info("Создана новая карточка: %s [%s] (%s ₽)", name, category, price)
 
-    if image_url:
+    if image_url and "placeholder" not in image_url.lower():
         try:
             content = download_and_prepare_image(image_url, ctx.config["POSIFLORA_URL"])
             ctx.moysklad.upload_image(product_id, str(source_id) + ".jpg", content)
@@ -804,26 +804,6 @@ def run_creation_phase(ctx):
 # -----------------------------------------------------------------------------
 # ОСТАТКИ И АРХИВАЦИЯ СТАРЫХ БУКЕТОВ
 # -----------------------------------------------------------------------------
-def archive_old_showcase_bouquets(ctx):
-    LOG.info("Проверка папки 'Витрина Tilda' на наличие устаревших букетов...")
-    archived_count = 0
-    for entry in ctx.index.items:
-        if entry.get("category") == "showcase" and not entry.get("archived"):
-            code = str(entry.get("code"))
-            name_norm = normalize_name(entry.get("name"))
-            # Проверяем как по ID (externalCode), так и по точному имени (например, Букет 1607)
-            if code not in ctx.active_bouquet_ids and name_norm not in ctx.active_bouquet_names:
-                if not ctx.dry_run:
-                    try:
-                        ctx.moysklad.update_product(entry["id"], {"archived": True})
-                        entry["archived"] = True
-                        archived_count += 1
-                        LOG.info("Отправлен в архив устаревший букет витрины: %s", entry.get("name"))
-                    except Exception as exc:
-                        LOG.error("Ошибка архивации %s: %s", entry.get("name"), exc)
-    LOG.info("Всего отправлено в архив устаревших букетов витрины: %s", archived_count)
-
-
 def fetch_current_stock(ctx):
     store_id = ctx.config["TARGET_STORE_ID"]
     body = ctx.moysklad.request("GET", "/report/stock/bystore/current", params={"filter": "storeId=" + store_id})
@@ -866,11 +846,15 @@ def compute_target(ctx, entry):
 def build_stock_plan(ctx, current_stock):
     enter_pos, loss_pos = [], []
     for entry in ctx.index.items:
-        if not entry.get("category") or entry.get("archived") or not entry.get("meta"):
+        if not entry.get("category") or not entry.get("meta"):
             continue
-        target = compute_target(ctx, entry)
+            
+        # Если товар в архиве, его целевой остаток должен быть 0.
+        target = 0.0 if entry.get("archived") else compute_target(ctx, entry)
+        
         if target is None:
             continue
+            
         current = current_stock.get(entry["id"], 0.0)
         diff = round(target - current, 3)
         if diff > 0:
@@ -910,6 +894,25 @@ def run_stock_phase(ctx):
     post_documents(ctx, "/entity/loss", l, "Списание")
 
 
+def archive_old_showcase_bouquets(ctx):
+    LOG.info("Проверка папки 'Витрина Tilda' на наличие устаревших букетов...")
+    archived_count = 0
+    for entry in ctx.index.items:
+        if entry.get("category") == "showcase" and not entry.get("archived"):
+            code = str(entry.get("code"))
+            name_norm = normalize_name(entry.get("name"))
+            if code not in ctx.active_bouquet_ids and name_norm not in ctx.active_bouquet_names:
+                if not ctx.dry_run:
+                    try:
+                        ctx.moysklad.update_product(entry["id"], {"archived": True})
+                        entry["archived"] = True
+                        archived_count += 1
+                        LOG.info("Отправлен в архив устаревший букет витрины: %s", entry.get("name"))
+                    except Exception as exc:
+                        LOG.error("Ошибка архивации %s: %s", entry.get("name"), exc)
+    LOG.info("Всего отправлено в архив устаревших букетов витрины: %s", archived_count)
+
+
 # -----------------------------------------------------------------------------
 # ГЛАВНЫЙ СЦЕНАРИЙ
 # -----------------------------------------------------------------------------
@@ -941,10 +944,18 @@ def main():
         LOG.info("Категории папок: %s", ", ".join(sorted(ctx.folder_meta.keys())))
         ctx.price_type_meta = ctx.moysklad.get_sale_price_type_meta()
         ctx.index = build_product_index(ctx.moysklad.list_entities("/entity/product"), ctx.folder_category)
+        
         load_posiflora_data(ctx)
+        
+        # 1. Создаем новые и обновляем цены
         run_creation_phase(ctx)
-        archive_old_showcase_bouquets(ctx)
+        
+        # 2. Актуализируем остатки (списываем пропавшие букеты в 0)
         run_stock_phase(ctx)
+        
+        # 3. Архивируем то, что было списано в 0 и исчезло с витрины
+        archive_old_showcase_bouquets(ctx)
+        
         LOG.info("Итоги: %s", ctx.stats)
     except ApiError as exc:
         LOG.error("Критическая ошибка: %s", exc)
