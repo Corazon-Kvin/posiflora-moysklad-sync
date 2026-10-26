@@ -556,7 +556,6 @@ def is_valid_bouquet_name(name):
 
 
 def fetch_valid_bouquets(posiflora):
-    # Ограничиваем запрос до 10 страниц (1000 букетов), чтобы не качать весь архив
     try:
         rows, included = posiflora.paginate("/bouquets", {"include": "logo,prices"}, max_pages=10)
     except ApiError:
@@ -722,7 +721,9 @@ def process_candidate(ctx, candidate):
         if is_reused_bouquet:
             update_payload["externalCode"] = source_id
 
-        if existing.get("archived"):
+        # РАЗАРХИВИРУЕМ СТРОГО ТОЛЬКО ТЕ БУКЕТЫ, КОТОРЫЕ ЕСТЬ НА ВИСТРИНЕ POSIFLORA
+        is_active_showcase = (category == "showcase" and (source_id in ctx.active_bouquet_ids or normalize_name(name) in ctx.active_bouquet_names))
+        if existing.get("archived") and is_active_showcase:
             update_payload["archived"] = False
 
         if existing.get("category") != category:
@@ -740,7 +741,8 @@ def process_candidate(ctx, candidate):
                 existing["category"] = category
                 existing["name"] = name
                 existing["code"] = source_id
-                existing["archived"] = False
+                if is_active_showcase:
+                    existing["archived"] = False
                 existing["price_kopecks"] = price_kopecks
                 ctx.index.by_code[source_id] = existing
                 ctx.stats["updated"] += 1
@@ -849,9 +851,7 @@ def build_stock_plan(ctx, current_stock):
         if not entry.get("category") or not entry.get("meta"):
             continue
             
-        # Если товар в архиве, его целевой остаток должен быть 0.
         target = 0.0 if entry.get("archived") else compute_target(ctx, entry)
-        
         if target is None:
             continue
             
@@ -947,13 +947,13 @@ def main():
         
         load_posiflora_data(ctx)
         
-        # 1. Создаем новые и обновляем цены
+        # 1. Создаем новые и обновляем цены/фото
         run_creation_phase(ctx)
         
-        # 2. Актуализируем остатки (списываем пропавшие букеты в 0)
+        # 2. Корректируем остатки (списываем пропавшие букеты в 0)
         run_stock_phase(ctx)
         
-        # 3. Архивируем то, что было списано в 0 и исчезло с витрины
+        # 3. Отправляем в архив те букеты, которых нет на витрине
         archive_old_showcase_bouquets(ctx)
         
         LOG.info("Итоги: %s", ctx.stats)
