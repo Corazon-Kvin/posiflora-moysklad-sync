@@ -557,9 +557,10 @@ def is_valid_bouquet_name(name):
 
 def fetch_valid_bouquets(posiflora):
     try:
-        rows, included = posiflora.paginate("/bouquets", {"include": "logo,prices"}, max_pages=10)
+        # Ограничиваем сбор строго первой страницей (актуальные букеты витрины)
+        rows, included = posiflora.paginate("/bouquets", {"include": "logo,prices"}, max_pages=1)
     except ApiError:
-        rows, included = posiflora.paginate("/bouquets", max_pages=10)
+        rows, included = posiflora.paginate("/bouquets", max_pages=1)
 
     included_index = build_included_index(included)
     result = []
@@ -721,7 +722,6 @@ def process_candidate(ctx, candidate):
         if is_reused_bouquet:
             update_payload["externalCode"] = source_id
 
-        # РАЗАРХИВИРУЕМ СТРОГО ТОЛЬКО ТЕ БУКЕТЫ, КОТОРЫЕ ЕСТЬ НА ВИСТРИНЕ POSIFLORA
         is_active_showcase = (category == "showcase" and (source_id in ctx.active_bouquet_ids or normalize_name(name) in ctx.active_bouquet_names))
         if existing.get("archived") and is_active_showcase:
             update_payload["archived"] = False
@@ -947,13 +947,8 @@ def main():
         
         load_posiflora_data(ctx)
         
-        # 1. Создаем новые и обновляем цены/фото
         run_creation_phase(ctx)
-        
-        # 2. Корректируем остатки (списываем пропавшие букеты в 0)
         run_stock_phase(ctx)
-        
-        # 3. Отправляем в архив те букеты, которых нет на витрине
         archive_old_showcase_bouquets(ctx)
         
         LOG.info("Итоги: %s", ctx.stats)
