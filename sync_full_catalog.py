@@ -547,20 +547,36 @@ def build_product_index(rows, folder_category):
 
 
 # -----------------------------------------------------------------------------
-# СБОР ДАННЫХ ИЗ POSIFLORA
+# СБОР ДАННЫХ ИЗ POSIFLORA (СТРОГО ОНЛАЙН-ВИТРИНА)
 # -----------------------------------------------------------------------------
 def is_valid_bouquet_name(name):
     if not name or is_blacklisted(name):
         return False
-    return bool(re.match(r"^букет\s*\d{3,4}$", name.strip(), re.IGNORECASE))
+    # Поддерживаем любые номера и названия со словом "букет"
+    return bool(re.search(r"букет", name, re.IGNORECASE) or name.strip().isdigit())
 
 
 def fetch_valid_bouquets(posiflora):
-    # Запрашиваем первую страницу (самые свежие букеты витрины)
-    try:
-        rows, included = posiflora.paginate("/bouquets", {"include": "logo,prices"}, page_size=50, max_pages=1)
-    except ApiError:
-        rows, included = posiflora.paginate("/bouquets", page_size=50, max_pages=1)
+    rows, included = [], []
+    
+    # Пробуем специализированные эндпоинты витрины Posiflora по очереди
+    query_attempts = [
+        ("/showcase/bouquets", {"include": "logo,prices", "sort": "-created_at"}),
+        ("/bouquets", {"filter[status]": "showcase", "include": "logo,prices", "sort": "-created_at"}),
+        ("/bouquets", {"filter[state]": "showcase", "include": "logo,prices", "sort": "-created_at"}),
+        ("/bouquets", {"include": "logo,prices", "sort": "-created_at"}),
+        ("/bouquets", {"include": "logo,prices"}),
+    ]
+
+    for path, params in query_attempts:
+        try:
+            r, inc = posiflora.paginate(path, params=params, page_size=100, max_pages=1)
+            if r:
+                rows, included = r, inc
+                LOG.info("Posiflora: успешный запрос через %s (получено %s записей)", path, len(rows))
+                break
+        except ApiError:
+            continue
 
     included_index = build_included_index(included)
     result = []
@@ -570,7 +586,7 @@ def fetch_valid_bouquets(posiflora):
         attrs = row.get("attributes") or {}
         status = str(attrs.get("status") or attrs.get("state") or "").strip().lower()
 
-        # Отсекаем только явно разобранные, проданные или удаленные
+        # Отсекаем разобранные, проданные или удаленные букеты
         if status in ("sold", "disassembled", "archived", "draft", "deleted", "canceled", "cancelled", "written_off", "write_off"):
             dropped += 1
             continue
@@ -602,7 +618,7 @@ def fetch_valid_bouquets(posiflora):
             "require_price": True,
         })
 
-    LOG.info("Posiflora: отобрано с витрины %s букетов (отсеяно %s)", len(result), dropped)
+    LOG.info("Posiflora: отобрано с витрины %s актуальных букетов (отсеяно %s)", len(result), dropped)
     return result
 
 
@@ -723,7 +739,7 @@ def process_candidate(ctx, candidate):
         if is_reused_bouquet:
             update_payload["externalCode"] = source_id
 
-        # Если товар был в архиве, но он ЕСТЬ в Posiflora — возвращаем из архива
+        # Букет возвращается из архива, если он активен на витрине Posiflora
         if existing.get("archived"):
             update_payload["archived"] = False
 
@@ -746,7 +762,7 @@ def process_candidate(ctx, candidate):
                 existing["price_kopecks"] = price_kopecks
                 ctx.index.by_code[source_id] = existing
                 ctx.stats["updated"] += 1
-                LOG.info("Восстановлен и обновлен букет: %s (id=%s, %s ₽)", name, source_id, price)
+                LOG.info("Обновлен актуальный букет: %s (id=%s, %s ₽)", name, source_id, price)
             except Exception as exc:
                 LOG.error("Ошибка при обновлении товара %s: %s", name, exc)
 
@@ -782,7 +798,7 @@ def process_candidate(ctx, candidate):
     }
     ctx.index.add(new_entry)
     ctx.stats["created"] += 1
-    LOG.info("Создана новая карточка: %s [%s] (%s ₽)", name, category, price)
+    LOG.info("Создана новая карточка витрины: %s [%s] (%s ₽)", name, category, price)
 
     if image_url and "placeholder" not in image_url.lower():
         try:
@@ -944,18 +960,12 @@ def main():
         LOG.info("Категории папок: %s", ", ".join(sorted(ctx.folder_meta.keys())))
         ctx.price_type_meta = ctx.moysklad.get_sale_price_type_meta()
         
-        # Загружаем товары, включая архивные, чтобы вернуть актуальные букеты витрины
         ctx.index = build_product_index(ctx.moysklad.list_entities("/entity/product", extra_params={"includeArchived": "true"}), ctx.folder_category)
         
         load_posiflora_data(ctx)
         
-        # 1. Возвращаем активные букеты из архива и создаем новые
         run_creation_phase(ctx)
-        
-        # 2. Выставляем актуальным букетам остаток 1, а пропавшим списываем в 0
         run_stock_phase(ctx)
-        
-        # 3. Архивируем только те, которых реально нет на витрине
         archive_old_showcase_bouquets(ctx)
         
         LOG.info("Итоги: %s", ctx.stats)
