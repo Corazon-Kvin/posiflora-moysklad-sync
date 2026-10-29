@@ -556,11 +556,11 @@ def is_valid_bouquet_name(name):
 
 
 def fetch_valid_bouquets(posiflora):
-    # Сканируем первые 10 страниц самых свежих букетов по дате создания
+    # Сканируем недавние букеты
     try:
-        rows, included = posiflora.paginate("/bouquets", {"include": "logo,prices", "sort": "-createdAt"}, page_size=100, max_pages=10)
+        rows, included = posiflora.paginate("/bouquets", {"include": "logo,prices", "sort": "-createdAt"}, page_size=100, max_pages=5)
     except ApiError:
-        rows, included = posiflora.paginate("/bouquets", page_size=100, max_pages=10)
+        rows, included = posiflora.paginate("/bouquets", page_size=100, max_pages=5)
 
     included_index = build_included_index(included)
     result = []
@@ -568,17 +568,10 @@ def fetch_valid_bouquets(posiflora):
 
     for row in rows:
         attrs = row.get("attributes") or {}
-        
-        # ГЛАВНЫЙ ФИЛЬТР: Проверяем, выставлен ли букет на витрину (публичный)
-        is_public = attrs.get("public") is True
-        if not is_public:
-            dropped += 1
-            continue
-
         status = str(attrs.get("status") or attrs.get("state") or "").strip().lower()
 
-        # Отсекаем проданные, архивные или просто купленные (purchased)
-        if status in ("sold", "disassembled", "archived", "draft", "deleted", "canceled", "cancelled", "written_off", "write_off", "purchased"):
+        # СТРОГИЙ ФИЛЬТР: Берем букеты ТОЛЬКО со статусом "showcase" (Витрина магазина)
+        if status != "showcase":
             dropped += 1
             continue
 
@@ -609,7 +602,7 @@ def fetch_valid_bouquets(posiflora):
             "require_price": True,
         })
 
-    LOG.info("Posiflora: отобрано строго с онлайн-витрины %s актуальных букетов (отсеяно %s)", len(result), dropped)
+    LOG.info("Posiflora: отобрано с витрины %s актуальных букетов (отсеяно %s)", len(result), dropped)
     return result
 
 
@@ -696,6 +689,32 @@ def load_config():
         raise ApiError("Не заданы ключи окружения")
     config["POSIFLORA_URL"], config["MOYSKLAD_URL"] = config["POSIFLORA_URL"].rstrip("/"), config["MOYSKLAD_URL"].rstrip("/")
     return config
+
+
+# -----------------------------------------------------------------------------
+# САНИТАРНЫЙ БЛОК: ПРОВЕРКА ПАПОК ДЛЯ СВЕЧЕЙ
+# -----------------------------------------------------------------------------
+def enforce_candle_category(ctx):
+    """
+    Принудительно находит все свечи в базе МоегоСклада и, 
+    если они лежат в папке 'Цветы' или другой неверной папке, переносит их в 'Свечи'.
+    """
+    candle_meta = ctx.folder_meta.get("candle")
+    if not candle_meta:
+        return
+        
+    for entry in ctx.index.items:
+        name_low = normalize_name(entry.get("name", ""))
+        # Ищем слово "свеч" в названии товара
+        if "свеч" in name_low and entry.get("category") != "candle":
+            if not ctx.dry_run:
+                try:
+                    ctx.moysklad.update_product(entry["id"], {"productFolder": {"meta": candle_meta}})
+                    entry["category"] = "candle"
+                    ctx.stats["updated"] += 1
+                    LOG.info("Перемещена свеча в правильную папку 'Свечи': %s", entry.get("name"))
+                except Exception as exc:
+                    LOG.error("Ошибка при перемещении свечи %s: %s", entry.get("name"), exc)
 
 
 # -----------------------------------------------------------------------------
@@ -955,6 +974,10 @@ def main():
         load_posiflora_data(ctx)
         
         run_creation_phase(ctx)
+        
+        # Запускаем проверку и перенос свечей в нужную папку
+        enforce_candle_category(ctx)
+        
         run_stock_phase(ctx)
         archive_old_showcase_bouquets(ctx)
         
