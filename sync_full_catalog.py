@@ -552,28 +552,29 @@ def build_product_index(rows, folder_category):
 def is_valid_bouquet_name(name):
     if not name or is_blacklisted(name):
         return False
-    # Поддерживаем любые номера и названия со словом "букет"
     return bool(re.search(r"букет", name, re.IGNORECASE) or name.strip().isdigit())
 
 
 def fetch_valid_bouquets(posiflora):
     rows, included = [], []
     
-    # Пробуем специализированные эндпоинты витрины Posiflora по очереди
+    # Запросы с корректными сортировками и фильтрами онлайн-витрины Posiflora
     query_attempts = [
-        ("/showcase/bouquets", {"include": "logo,prices", "sort": "-created_at"}),
-        ("/bouquets", {"filter[status]": "showcase", "include": "logo,prices", "sort": "-created_at"}),
-        ("/bouquets", {"filter[state]": "showcase", "include": "logo,prices", "sort": "-created_at"}),
-        ("/bouquets", {"include": "logo,prices", "sort": "-created_at"}),
-        ("/bouquets", {"include": "logo,prices"}),
+        ("/showcase/bouquets", {"include": "logo,prices", "sort": "-createdAt"}),
+        ("/showcase/bouquets", {"include": "logo,prices", "sort": "-id"}),
+        ("/showcase/bouquets", {"include": "logo,prices"}),
+        ("/bouquets", {"filter[showcase]": "true", "include": "logo,prices", "sort": "-createdAt"}),
+        ("/bouquets", {"filter[on_showcase]": "true", "include": "logo,prices", "sort": "-createdAt"}),
+        ("/bouquets", {"include": "logo,prices", "sort": "-createdAt"}),
+        ("/bouquets", {"include": "logo,prices", "sort": "-id"}),
     ]
 
     for path, params in query_attempts:
         try:
-            r, inc = posiflora.paginate(path, params=params, page_size=100, max_pages=1)
+            r, inc = posiflora.paginate(path, params=params, page_size=50, max_pages=1)
             if r:
                 rows, included = r, inc
-                LOG.info("Posiflora: успешный запрос через %s (получено %s записей)", path, len(rows))
+                LOG.info("Posiflora: успешный запрос через %s %s (получено %s записей)", path, params, len(rows))
                 break
         except ApiError:
             continue
@@ -586,7 +587,6 @@ def fetch_valid_bouquets(posiflora):
         attrs = row.get("attributes") or {}
         status = str(attrs.get("status") or attrs.get("state") or "").strip().lower()
 
-        # Отсекаем разобранные, проданные или удаленные букеты
         if status in ("sold", "disassembled", "archived", "draft", "deleted", "canceled", "cancelled", "written_off", "write_off"):
             dropped += 1
             continue
@@ -739,7 +739,6 @@ def process_candidate(ctx, candidate):
         if is_reused_bouquet:
             update_payload["externalCode"] = source_id
 
-        # Букет возвращается из архива, если он активен на витрине Posiflora
         if existing.get("archived"):
             update_payload["archived"] = False
 
