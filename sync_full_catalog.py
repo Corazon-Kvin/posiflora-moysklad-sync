@@ -557,7 +557,6 @@ def is_valid_bouquet_name(name):
 
 def fetch_valid_bouquets(posiflora):
     try:
-        # Ограничиваем сбор строго первой страницей (актуальные букеты витрины)
         rows, included = posiflora.paginate("/bouquets", {"include": "logo,prices"}, max_pages=1)
     except ApiError:
         rows, included = posiflora.paginate("/bouquets", max_pages=1)
@@ -570,7 +569,28 @@ def fetch_valid_bouquets(posiflora):
         attrs = row.get("attributes") or {}
         status = str(attrs.get("status") or attrs.get("state") or "").strip().lower()
 
+        # 1. Отсеиваем явно проданные, черновики и архивы
         if status in ("sold", "disassembled", "archived", "draft", "deleted", "canceled", "cancelled", "written_off", "write_off"):
+            dropped += 1
+            continue
+
+        # 2. ЖЕСТКИЙ ФИЛЬТР: Ищем признак "Онлайн-витрины"
+        # Posiflora отдает флажок выгрузки на сайт как булево поле в JSON.
+        is_on_showcase = False
+        
+        if status in ("showcase", "on_window", "published", "online"):
+            is_on_showcase = True
+            
+        if not is_on_showcase:
+            for k, v in attrs.items():
+                if isinstance(v, bool) and v is True:
+                    k_low = k.lower()
+                    # Ищем любые стандартные ключи Posiflora, отвечающие за онлайн-продажи
+                    if "online" in k_low or "publish" in k_low or "showcase" in k_low or "window" in k_low:
+                        is_on_showcase = True
+                        break
+                        
+        if not is_on_showcase:
             dropped += 1
             continue
 
@@ -601,7 +621,7 @@ def fetch_valid_bouquets(posiflora):
             "require_price": True,
         })
 
-    LOG.info("Posiflora: отобрано с витрины %s букетов (отсеяно %s)", len(result), dropped)
+    LOG.info("Posiflora: отобрано строго с онлайн-витрины %s букетов (отсеяно из магазина %s)", len(result), dropped)
     return result
 
 
@@ -722,6 +742,7 @@ def process_candidate(ctx, candidate):
         if is_reused_bouquet:
             update_payload["externalCode"] = source_id
 
+        # Букет возвращается из архива СТРОГО если он присутствует в активном списке витрины Posiflora
         is_active_showcase = (category == "showcase" and (source_id in ctx.active_bouquet_ids or normalize_name(name) in ctx.active_bouquet_names))
         if existing.get("archived") and is_active_showcase:
             update_payload["archived"] = False
@@ -947,8 +968,13 @@ def main():
         
         load_posiflora_data(ctx)
         
+        # 1. Создаем/обновляем товары
         run_creation_phase(ctx)
+        
+        # 2. Корректируем остатки (у пропавших букетов остаток уйдет в 0)
         run_stock_phase(ctx)
+        
+        # 3. Отправляем в архив те букеты, которых больше нет на онлайн-витрине
         archive_old_showcase_bouquets(ctx)
         
         LOG.info("Итоги: %s", ctx.stats)
