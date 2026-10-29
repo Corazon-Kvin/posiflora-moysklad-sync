@@ -570,7 +570,7 @@ def fetch_valid_bouquets(posiflora):
         attrs = row.get("attributes") or {}
         status = str(attrs.get("status") or attrs.get("state") or "").strip().lower()
 
-        # СТРОГИЙ ФИЛЬТР: Берем букеты ТОЛЬКО со статусом "showcase" (Витрина магазина)
+        # ВОЗВРАЩАЕМ ПРОВЕРКУ СТАТУСА ВИСТРИНЫ (showcase). Это те букеты, которые лежат на физической витрине.
         if status != "showcase":
             dropped += 1
             continue
@@ -692,21 +692,21 @@ def load_config():
 
 
 # -----------------------------------------------------------------------------
-# САНИТАРНЫЙ БЛОК: ПРОВЕРКА ПАПОК ДЛЯ СВЕЧЕЙ
+# САНИТАРНЫЙ БЛОК: ОЧИСТКА ПАПКИ ЦВЕТЫ
 # -----------------------------------------------------------------------------
-def enforce_candle_category(ctx):
+def enforce_category_rules(ctx):
     """
-    Принудительно находит все свечи в базе МоегоСклада и, 
-    если они лежат в папке 'Цветы' или другой неверной папке, переносит их в 'Свечи'.
+    Принудительно очищает папку 'Цветы' от мусора (эклеров, кофе)
+    и переносит свечи в папку 'Свечи'.
     """
     candle_meta = ctx.folder_meta.get("candle")
-    if not candle_meta:
-        return
+    recipes_meta = ctx.folder_meta.get("recipes") # Это папка "Каталог/Цветы"
         
     for entry in ctx.index.items:
         name_low = normalize_name(entry.get("name", ""))
-        # Ищем слово "свеч" в названии товара
-        if "свеч" in name_low and entry.get("category") != "candle":
+        
+        # 1. Перенос свечей
+        if "свеч" in name_low and entry.get("category") != "candle" and candle_meta:
             if not ctx.dry_run:
                 try:
                     ctx.moysklad.update_product(entry["id"], {"productFolder": {"meta": candle_meta}})
@@ -715,6 +715,18 @@ def enforce_candle_category(ctx):
                     LOG.info("Перемещена свеча в правильную папку 'Свечи': %s", entry.get("name"))
                 except Exception as exc:
                     LOG.error("Ошибка при перемещении свечи %s: %s", entry.get("name"), exc)
+                    
+        # 2. Архивирование мусора из папки Цветы
+        if entry.get("category") == "recipes" and not entry.get("archived"):
+            if is_blacklisted(name_low):
+                if not ctx.dry_run:
+                    try:
+                        ctx.moysklad.update_product(entry["id"], {"archived": True})
+                        entry["archived"] = True
+                        ctx.stats["updated"] += 1
+                        LOG.info("Удален мусор из папки Цветы (в архив): %s", entry.get("name"))
+                    except Exception as exc:
+                        LOG.error("Ошибка архивации мусора %s: %s", entry.get("name"), exc)
 
 
 # -----------------------------------------------------------------------------
@@ -973,12 +985,16 @@ def main():
         
         load_posiflora_data(ctx)
         
+        # 1. Возвращаем активные букеты из архива и создаем новые
         run_creation_phase(ctx)
         
-        # Запускаем проверку и перенос свечей в нужную папку
-        enforce_candle_category(ctx)
+        # 2. Очищаем папку "Цветы" от кофе и эклеров, переносим свечи
+        enforce_category_rules(ctx)
         
+        # 3. Выставляем актуальным букетам остаток 1, а пропавшим списываем в 0
         run_stock_phase(ctx)
+        
+        # 4. Архивируем те букеты витрины, которые исчезли из Posiflora
         archive_old_showcase_bouquets(ctx)
         
         LOG.info("Итоги: %s", ctx.stats)
