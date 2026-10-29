@@ -547,7 +547,7 @@ def build_product_index(rows, folder_category):
 
 
 # -----------------------------------------------------------------------------
-# СБОР ДАННЫХ ИЗ POSIFLORA
+# СБОР ДАННЫХ ИЗ POSIFLORA (СТРОГО ОНЛАЙН-ВИТРИНА)
 # -----------------------------------------------------------------------------
 def is_valid_bouquet_name(name):
     if not name or is_blacklisted(name):
@@ -555,28 +555,30 @@ def is_valid_bouquet_name(name):
     return bool(re.search(r"букет", name, re.IGNORECASE) or name.strip().isdigit())
 
 
-def extract_bouquet_number(name):
-    m = re.search(r"\d{3,4}", name)
-    return int(m.group(0)) if m else 0
-
-
 def fetch_valid_bouquets(posiflora):
-    # Загружаем первые 1-2 страницы букетов
+    # Сканируем первые 10 страниц самых свежих букетов по дате создания
     try:
-        rows, included = posiflora.paginate("/bouquets", {"include": "logo,prices"}, page_size=100, max_pages=2)
+        rows, included = posiflora.paginate("/bouquets", {"include": "logo,prices", "sort": "-createdAt"}, page_size=100, max_pages=10)
     except ApiError:
-        rows, included = posiflora.paginate("/bouquets", page_size=100, max_pages=2)
+        rows, included = posiflora.paginate("/bouquets", page_size=100, max_pages=10)
 
     included_index = build_included_index(included)
-    valid_candidates = []
+    result = []
     dropped = 0
 
     for row in rows:
         attrs = row.get("attributes") or {}
+        
+        # ГЛАВНЫЙ ФИЛЬТР: Проверяем, выставлен ли букет на витрину (публичный)
+        is_public = attrs.get("public") is True
+        if not is_public:
+            dropped += 1
+            continue
+
         status = str(attrs.get("status") or attrs.get("state") or "").strip().lower()
 
-        # Отсекаем явно закрытые/проданые
-        if status in ("sold", "disassembled", "archived", "draft", "deleted", "canceled", "cancelled", "written_off", "write_off"):
+        # Отсекаем проданные, архивные или просто купленные (purchased)
+        if status in ("sold", "disassembled", "archived", "draft", "deleted", "canceled", "cancelled", "written_off", "write_off", "purchased"):
             dropped += 1
             continue
 
@@ -597,10 +599,9 @@ def fetch_valid_bouquets(posiflora):
 
         image_url = logo_from_included(row, included_index)
 
-        valid_candidates.append({
+        result.append({
             "id": str(row.get("id")),
             "name": name,
-            "number": extract_bouquet_number(name),
             "price": price,
             "image_url": image_url,
             "category": "showcase",
@@ -608,13 +609,7 @@ def fetch_valid_bouquets(posiflora):
             "require_price": True,
         })
 
-    # Сортируем по номеру букета по убыванию (Букет 2904, 2903, 2902... в начало)
-    valid_candidates.sort(key=lambda x: x["number"], reverse=True)
-    
-    # Берем топ актуальных букетов (до 30 самых свежих номеров витрины)
-    result = valid_candidates[:30]
-
-    LOG.info("Posiflora: отобрано с витрины %s актуальных букетов (отсеяно %s)", len(result), dropped)
+    LOG.info("Posiflora: отобрано строго с онлайн-витрины %s актуальных букетов (отсеяно %s)", len(result), dropped)
     return result
 
 
