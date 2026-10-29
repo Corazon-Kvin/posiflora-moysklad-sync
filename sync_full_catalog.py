@@ -547,7 +547,7 @@ def build_product_index(rows, folder_category):
 
 
 # -----------------------------------------------------------------------------
-# СБОР ДАННЫХ ИЗ POSIFLORA (СТРОГО ОНЛАЙН-ВИТРИНА)
+# СБОР ДАННЫХ ИЗ POSIFLORA
 # -----------------------------------------------------------------------------
 def is_valid_bouquet_name(name):
     if not name or is_blacklisted(name):
@@ -555,38 +555,27 @@ def is_valid_bouquet_name(name):
     return bool(re.search(r"букет", name, re.IGNORECASE) or name.strip().isdigit())
 
 
-def fetch_valid_bouquets(posiflora):
-    rows, included = [], []
-    
-    # Запросы с корректными сортировками и фильтрами онлайн-витрины Posiflora
-    query_attempts = [
-        ("/showcase/bouquets", {"include": "logo,prices", "sort": "-createdAt"}),
-        ("/showcase/bouquets", {"include": "logo,prices", "sort": "-id"}),
-        ("/showcase/bouquets", {"include": "logo,prices"}),
-        ("/bouquets", {"filter[showcase]": "true", "include": "logo,prices", "sort": "-createdAt"}),
-        ("/bouquets", {"filter[on_showcase]": "true", "include": "logo,prices", "sort": "-createdAt"}),
-        ("/bouquets", {"include": "logo,prices", "sort": "-createdAt"}),
-        ("/bouquets", {"include": "logo,prices", "sort": "-id"}),
-    ]
+def extract_bouquet_number(name):
+    m = re.search(r"\d{3,4}", name)
+    return int(m.group(0)) if m else 0
 
-    for path, params in query_attempts:
-        try:
-            r, inc = posiflora.paginate(path, params=params, page_size=50, max_pages=1)
-            if r:
-                rows, included = r, inc
-                LOG.info("Posiflora: успешный запрос через %s %s (получено %s записей)", path, params, len(rows))
-                break
-        except ApiError:
-            continue
+
+def fetch_valid_bouquets(posiflora):
+    # Загружаем первые 1-2 страницы букетов
+    try:
+        rows, included = posiflora.paginate("/bouquets", {"include": "logo,prices"}, page_size=100, max_pages=2)
+    except ApiError:
+        rows, included = posiflora.paginate("/bouquets", page_size=100, max_pages=2)
 
     included_index = build_included_index(included)
-    result = []
+    valid_candidates = []
     dropped = 0
 
     for row in rows:
         attrs = row.get("attributes") or {}
         status = str(attrs.get("status") or attrs.get("state") or "").strip().lower()
 
+        # Отсекаем явно закрытые/проданые
         if status in ("sold", "disassembled", "archived", "draft", "deleted", "canceled", "cancelled", "written_off", "write_off"):
             dropped += 1
             continue
@@ -608,15 +597,22 @@ def fetch_valid_bouquets(posiflora):
 
         image_url = logo_from_included(row, included_index)
 
-        result.append({
+        valid_candidates.append({
             "id": str(row.get("id")),
             "name": name,
+            "number": extract_bouquet_number(name),
             "price": price,
             "image_url": image_url,
             "category": "showcase",
             "needs_detail": True,
             "require_price": True,
         })
+
+    # Сортируем по номеру букета по убыванию (Букет 2904, 2903, 2902... в начало)
+    valid_candidates.sort(key=lambda x: x["number"], reverse=True)
+    
+    # Берем топ актуальных букетов (до 30 самых свежих номеров витрины)
+    result = valid_candidates[:30]
 
     LOG.info("Posiflora: отобрано с витрины %s актуальных букетов (отсеяно %s)", len(result), dropped)
     return result
