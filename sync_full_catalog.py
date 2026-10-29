@@ -547,7 +547,7 @@ def build_product_index(rows, folder_category):
 
 
 # -----------------------------------------------------------------------------
-# СБОР ДАННЫХ ИЗ POSIFLORA (СТРОГО ОНЛАЙН-ВИТРИНА)
+# СБОР ДАННЫХ ИЗ POSIFLORA (СТРОГО ВИТРИНА)
 # -----------------------------------------------------------------------------
 def is_valid_bouquet_name(name):
     if not name or is_blacklisted(name):
@@ -556,11 +556,11 @@ def is_valid_bouquet_name(name):
 
 
 def fetch_valid_bouquets(posiflora):
-    # Сканируем недавние букеты
+    # Увеличиваем глубину до 20 страниц (2000 букетов), чтобы точно захватить старые букеты, стоящие на витрине
     try:
-        rows, included = posiflora.paginate("/bouquets", {"include": "logo,prices", "sort": "-createdAt"}, page_size=100, max_pages=5)
+        rows, included = posiflora.paginate("/bouquets", {"include": "logo,prices", "sort": "-createdAt"}, page_size=100, max_pages=20)
     except ApiError:
-        rows, included = posiflora.paginate("/bouquets", page_size=100, max_pages=5)
+        rows, included = posiflora.paginate("/bouquets", page_size=100, max_pages=20)
 
     included_index = build_included_index(included)
     result = []
@@ -568,10 +568,18 @@ def fetch_valid_bouquets(posiflora):
 
     for row in rows:
         attrs = row.get("attributes") or {}
+        
+        # ГЛАВНЫЙ ФИЛЬТР ВИТРИНЫ: проверяем поле onWindowAt 
+        # (если в нем есть дата, значит букет сейчас физически выставлен на витрину магазина)
+        on_window_at = attrs.get("onWindowAt")
+        if not on_window_at:
+            dropped += 1
+            continue
+
         status = str(attrs.get("status") or attrs.get("state") or "").strip().lower()
 
-        # ВОЗВРАЩАЕМ ПРОВЕРКУ СТАТУСА ВИСТРИНЫ (showcase). Это те букеты, которые лежат на физической витрине.
-        if status != "showcase":
+        # Отсекаем проданные, архивные или разобранные (даже если у них осталась дата витрины)
+        if status in ("sold", "disassembled", "archived", "draft", "deleted", "canceled", "cancelled", "written_off", "write_off"):
             dropped += 1
             continue
 
@@ -692,15 +700,15 @@ def load_config():
 
 
 # -----------------------------------------------------------------------------
-# САНИТАРНЫЙ БЛОК: ОЧИСТКА ПАПКИ ЦВЕТЫ
+# САНИТАРНЫЙ БЛОК: ОЧИСТКА ПАПОК ОТ МУСОРА
 # -----------------------------------------------------------------------------
 def enforce_category_rules(ctx):
     """
-    Принудительно очищает папку 'Цветы' от мусора (эклеров, кофе)
+    Принудительно очищает папки от мусора (эклеров, кофе)
     и переносит свечи в папку 'Свечи'.
     """
     candle_meta = ctx.folder_meta.get("candle")
-    recipes_meta = ctx.folder_meta.get("recipes") # Это папка "Каталог/Цветы"
+    recipes_meta = ctx.folder_meta.get("recipes")
         
     for entry in ctx.index.items:
         name_low = normalize_name(entry.get("name", ""))
@@ -716,17 +724,16 @@ def enforce_category_rules(ctx):
                 except Exception as exc:
                     LOG.error("Ошибка при перемещении свечи %s: %s", entry.get("name"), exc)
                     
-        # 2. Архивирование мусора из папки Цветы
-        if entry.get("category") == "recipes" and not entry.get("archived"):
-            if is_blacklisted(name_low):
-                if not ctx.dry_run:
-                    try:
-                        ctx.moysklad.update_product(entry["id"], {"archived": True})
-                        entry["archived"] = True
-                        ctx.stats["updated"] += 1
-                        LOG.info("Удален мусор из папки Цветы (в архив): %s", entry.get("name"))
-                    except Exception as exc:
-                        LOG.error("Ошибка архивации мусора %s: %s", entry.get("name"), exc)
+        # 2. Архивирование мусора
+        if not entry.get("archived") and is_blacklisted(name_low):
+            if not ctx.dry_run:
+                try:
+                    ctx.moysklad.update_product(entry["id"], {"archived": True})
+                    entry["archived"] = True
+                    ctx.stats["updated"] += 1
+                    LOG.info("Удален мусор из каталога (в архив): %s", entry.get("name"))
+                except Exception as exc:
+                    LOG.error("Ошибка архивации мусора %s: %s", entry.get("name"), exc)
 
 
 # -----------------------------------------------------------------------------
@@ -988,7 +995,7 @@ def main():
         # 1. Возвращаем активные букеты из архива и создаем новые
         run_creation_phase(ctx)
         
-        # 2. Очищаем папку "Цветы" от кофе и эклеров, переносим свечи
+        # 2. Очищаем папки от кофе, эклеров, переносим свечи
         enforce_category_rules(ctx)
         
         # 3. Выставляем актуальным букетам остаток 1, а пропавшим списываем в 0
