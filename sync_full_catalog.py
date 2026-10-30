@@ -22,8 +22,8 @@ from PIL import Image
 # -----------------------------------------------------------------------------
 REQUEST_PAUSE = 0.05
 MAX_RETRIES = 5
-HTTP_TIMEOUT = 60
-IMAGE_TIMEOUT = 7  # Жесткий таймаут для битых ссылок на фото (в секундах)
+HTTP_TIMEOUT = 20  # Снижено до 20 сек для защиты от зависаний API МоегоСклада
+IMAGE_TIMEOUT = 5  # Жесткий таймаут для битых ссылок на фото
 MAX_PAGES = 2000
 DOCUMENT_CHUNK_SIZE = 1000
 AUTHOR_STOCK_LIMIT = 5.0
@@ -508,7 +508,7 @@ def build_folder_registry(rows):
 
 
 # -----------------------------------------------------------------------------
-# ИНДЕКС ТОВАРОВ МОЕГОСКЛАДА (ВКЛЮЧАЯ АРХИВ)
+# ИНДЕКС ТОВАРОВ МОЕГОСКЛАДА
 # -----------------------------------------------------------------------------
 class ProductIndex:
     def __init__(self):
@@ -548,7 +548,7 @@ def build_product_index(rows, folder_category):
 
 
 # -----------------------------------------------------------------------------
-# СБОР ДАННЫХ ИЗ POSIFLORA (СТРОГО ВИТРИНА)
+# СБОР ДАННЫХ ИЗ POSIFLORA
 # -----------------------------------------------------------------------------
 def is_valid_bouquet_name(name):
     if not name or is_blacklisted(name):
@@ -557,11 +557,10 @@ def is_valid_bouquet_name(name):
 
 
 def fetch_valid_bouquets(posiflora):
-    # Уменьшаем до 5 страниц (этого достаточно для свежей витрины) для ускорения
     try:
-        rows, included = posiflora.paginate("/bouquets", {"include": "logo,prices", "sort": "-createdAt"}, page_size=100, max_pages=5)
+        rows, included = posiflora.paginate("/bouquets", {"include": "logo,prices", "sort": "-createdAt"}, page_size=100, max_pages=10)
     except ApiError:
-        rows, included = posiflora.paginate("/bouquets", page_size=100, max_pages=5)
+        rows, included = posiflora.paginate("/bouquets", page_size=100, max_pages=10)
 
     included_index = build_included_index(included)
     result = []
@@ -577,7 +576,9 @@ def fetch_valid_bouquets(posiflora):
 
         status = str(attrs.get("status") or attrs.get("state") or "").strip().lower()
 
-        if status in ("sold", "disassembled", "archived", "draft", "deleted", "canceled", "cancelled", "written_off", "write_off"):
+        # ЖЕСТКИЙ ФИЛЬТР: Берем букет только если его статус строго "Собран" (assembled) или "На витрине" (on_window).
+        # Это мгновенно отсечет все старые проданные букеты (purchased, sold).
+        if status not in ("assembled", "on_window"):
             dropped += 1
             continue
 
@@ -604,7 +605,7 @@ def fetch_valid_bouquets(posiflora):
             "price": price,
             "image_url": image_url,
             "category": "showcase",
-            "needs_detail": True,
+            "needs_detail": False, # ОТКЛЮЧЕНО: Избавляемся от сотен дополнительных HTTP запросов
             "require_price": True,
         })
 
@@ -648,14 +649,14 @@ def fetch_inventory_items(posiflora):
 
 
 # -----------------------------------------------------------------------------
-# ИЗОБРАЖЕНИЯ (С ОПТИМИЗАЦИЕЙ ТАЙМАУТОВ)
+# ИЗОБРАЖЕНИЯ
 # -----------------------------------------------------------------------------
 def download_and_prepare_image(url, posiflora_base_url):
     full_url = "https:" + url if url.startswith("//") else (url if url.startswith("http") else urljoin(posiflora_base_url.rstrip("/") + "/", url))
     headers = {"User-Agent": BROWSER_UA, "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"}
     time.sleep(REQUEST_PAUSE)
     
-    # Используем укороченный IMAGE_TIMEOUT, чтобы не зависать на битых ссылках
+    # Ограничиваем ожидание, чтобы скрипт не висел часами
     response = requests.get(full_url, headers=headers, timeout=IMAGE_TIMEOUT)
     if response.status_code != 200:
         raise ApiError("Изображение недоступно: HTTP {0}".format(response.status_code))
@@ -976,13 +977,9 @@ def main():
     ctx = AppContext()
     ctx.config, ctx.dry_run = load_config(), env_bool("DRY_RUN")
     try:
-        ctx.posiflora = PosifloraClient(ctx.config["POSIFLORA_URL"], ctx.config["POSIFLORA_URL"], ctx.config["POSIFLORA_PASS"])
+        ctx.posiflora = PosifloraClient(ctx.config["POSIFLORA_URL"], ctx.config["POSIFLORA_USER"], ctx.config["POSIFLORA_PASS"])
         ctx.moysklad = MoySkladClient(ctx.config["MOYSKLAD_URL"], ctx.config["MOYSKLAD_TOKEN"])
-        
-        # Исправление бага инициализации (имя пользователя)
-        ctx.posiflora.username = ctx.config["POSIFLORA_USER"]
         ctx.posiflora.login()
-        
         ctx.folder_category, ctx.folder_meta = build_folder_registry(ctx.moysklad.list_entities("/entity/productfolder"))
         LOG.info("Категории папок: %s", ", ".join(sorted(ctx.folder_meta.keys())))
         ctx.price_type_meta = ctx.moysklad.get_sale_price_type_meta()
