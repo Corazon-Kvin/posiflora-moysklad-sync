@@ -23,6 +23,7 @@ from PIL import Image
 REQUEST_PAUSE = 0.05
 MAX_RETRIES = 5
 HTTP_TIMEOUT = 60
+IMAGE_TIMEOUT = 7  # Жесткий таймаут для битых ссылок на фото (в секундах)
 MAX_PAGES = 2000
 DOCUMENT_CHUNK_SIZE = 1000
 AUTHOR_STOCK_LIMIT = 5.0
@@ -556,11 +557,11 @@ def is_valid_bouquet_name(name):
 
 
 def fetch_valid_bouquets(posiflora):
-    # Увеличиваем глубину до 20 страниц (2000 букетов), чтобы точно захватить старые букеты, стоящие на витрине
+    # Уменьшаем до 5 страниц (этого достаточно для свежей витрины) для ускорения
     try:
-        rows, included = posiflora.paginate("/bouquets", {"include": "logo,prices", "sort": "-createdAt"}, page_size=100, max_pages=20)
+        rows, included = posiflora.paginate("/bouquets", {"include": "logo,prices", "sort": "-createdAt"}, page_size=100, max_pages=5)
     except ApiError:
-        rows, included = posiflora.paginate("/bouquets", page_size=100, max_pages=20)
+        rows, included = posiflora.paginate("/bouquets", page_size=100, max_pages=5)
 
     included_index = build_included_index(included)
     result = []
@@ -569,8 +570,6 @@ def fetch_valid_bouquets(posiflora):
     for row in rows:
         attrs = row.get("attributes") or {}
         
-        # ГЛАВНЫЙ ФИЛЬТР ВИТРИНЫ: проверяем поле onWindowAt 
-        # (если в нем есть дата, значит букет сейчас физически выставлен на витрину магазина)
         on_window_at = attrs.get("onWindowAt")
         if not on_window_at:
             dropped += 1
@@ -578,7 +577,6 @@ def fetch_valid_bouquets(posiflora):
 
         status = str(attrs.get("status") or attrs.get("state") or "").strip().lower()
 
-        # Отсекаем проданные, архивные или разобранные (даже если у них осталась дата витрины)
         if status in ("sold", "disassembled", "archived", "draft", "deleted", "canceled", "cancelled", "written_off", "write_off"):
             dropped += 1
             continue
@@ -650,15 +648,18 @@ def fetch_inventory_items(posiflora):
 
 
 # -----------------------------------------------------------------------------
-# ИЗОБРАЖЕНИЯ
+# ИЗОБРАЖЕНИЯ (С ОПТИМИЗАЦИЕЙ ТАЙМАУТОВ)
 # -----------------------------------------------------------------------------
 def download_and_prepare_image(url, posiflora_base_url):
     full_url = "https:" + url if url.startswith("//") else (url if url.startswith("http") else urljoin(posiflora_base_url.rstrip("/") + "/", url))
     headers = {"User-Agent": BROWSER_UA, "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"}
     time.sleep(REQUEST_PAUSE)
-    response = requests.get(full_url, headers=headers, timeout=HTTP_TIMEOUT)
+    
+    # Используем укороченный IMAGE_TIMEOUT, чтобы не зависать на битых ссылках
+    response = requests.get(full_url, headers=headers, timeout=IMAGE_TIMEOUT)
     if response.status_code != 200:
         raise ApiError("Изображение недоступно: HTTP {0}".format(response.status_code))
+    
     image = Image.open(io.BytesIO(response.content))
     image.load()
     if image.mode in ("RGBA", "LA") or (image.mode == "P" and "transparency" in image.info):
@@ -703,17 +704,12 @@ def load_config():
 # САНИТАРНЫЙ БЛОК: ОЧИСТКА ПАПОК ОТ МУСОРА
 # -----------------------------------------------------------------------------
 def enforce_category_rules(ctx):
-    """
-    Принудительно очищает папки от мусора (эклеров, кофе)
-    и переносит свечи в папку 'Свечи'.
-    """
     candle_meta = ctx.folder_meta.get("candle")
     recipes_meta = ctx.folder_meta.get("recipes")
         
     for entry in ctx.index.items:
         name_low = normalize_name(entry.get("name", ""))
         
-        # 1. Перенос свечей
         if "свеч" in name_low and entry.get("category") != "candle" and candle_meta:
             if not ctx.dry_run:
                 try:
@@ -724,7 +720,6 @@ def enforce_category_rules(ctx):
                 except Exception as exc:
                     LOG.error("Ошибка при перемещении свечи %s: %s", entry.get("name"), exc)
                     
-        # 2. Архивирование мусора
         if not entry.get("archived") and is_blacklisted(name_low):
             if not ctx.dry_run:
                 try:
@@ -981,9 +976,13 @@ def main():
     ctx = AppContext()
     ctx.config, ctx.dry_run = load_config(), env_bool("DRY_RUN")
     try:
-        ctx.posiflora = PosifloraClient(ctx.config["POSIFLORA_URL"], ctx.config["POSIFLORA_USER"], ctx.config["POSIFLORA_PASS"])
+        ctx.posiflora = PosifloraClient(ctx.config["POSIFLORA_URL"], ctx.config["POSIFLORA_URL"], ctx.config["POSIFLORA_PASS"])
         ctx.moysklad = MoySkladClient(ctx.config["MOYSKLAD_URL"], ctx.config["MOYSKLAD_TOKEN"])
+        
+        # Исправление бага инициализации (имя пользователя)
+        ctx.posiflora.username = ctx.config["POSIFLORA_USER"]
         ctx.posiflora.login()
+        
         ctx.folder_category, ctx.folder_meta = build_folder_registry(ctx.moysklad.list_entities("/entity/productfolder"))
         LOG.info("Категории папок: %s", ", ".join(sorted(ctx.folder_meta.keys())))
         ctx.price_type_meta = ctx.moysklad.get_sale_price_type_meta()
@@ -992,16 +991,9 @@ def main():
         
         load_posiflora_data(ctx)
         
-        # 1. Возвращаем активные букеты из архива и создаем новые
         run_creation_phase(ctx)
-        
-        # 2. Очищаем папки от кофе, эклеров, переносим свечи
         enforce_category_rules(ctx)
-        
-        # 3. Выставляем актуальным букетам остаток 1, а пропавшим списываем в 0
         run_stock_phase(ctx)
-        
-        # 4. Архивируем те букеты витрины, которые исчезли из Posiflora
         archive_old_showcase_bouquets(ctx)
         
         LOG.info("Итоги: %s", ctx.stats)
