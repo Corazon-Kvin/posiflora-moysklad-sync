@@ -22,8 +22,8 @@ from PIL import Image
 # -----------------------------------------------------------------------------
 REQUEST_PAUSE = 0.05
 MAX_RETRIES = 5
-HTTP_TIMEOUT = 20  # Снижено до 20 сек для защиты от зависаний API МоегоСклада
-IMAGE_TIMEOUT = 5  # Жесткий таймаут для битых ссылок на фото
+HTTP_TIMEOUT = 60  # Возвращаем 60 сек (нужно для выгрузки всего каталога из МоегоСклада)
+IMAGE_TIMEOUT = 5  # Оставляем 5 сек для фото (именно это защищает от 3-х часовых зависаний)
 MAX_PAGES = 2000
 DOCUMENT_CHUNK_SIZE = 1000
 AUTHOR_STOCK_LIMIT = 5.0
@@ -576,8 +576,6 @@ def fetch_valid_bouquets(posiflora):
 
         status = str(attrs.get("status") or attrs.get("state") or "").strip().lower()
 
-        # ЖЕСТКИЙ ФИЛЬТР: Берем букет только если его статус строго "Собран" (assembled) или "На витрине" (on_window).
-        # Это мгновенно отсечет все старые проданные букеты (purchased, sold).
         if status not in ("assembled", "on_window"):
             dropped += 1
             continue
@@ -605,7 +603,7 @@ def fetch_valid_bouquets(posiflora):
             "price": price,
             "image_url": image_url,
             "category": "showcase",
-            "needs_detail": False, # ОТКЛЮЧЕНО: Избавляемся от сотен дополнительных HTTP запросов
+            "needs_detail": False,
             "require_price": True,
         })
 
@@ -656,7 +654,6 @@ def download_and_prepare_image(url, posiflora_base_url):
     headers = {"User-Agent": BROWSER_UA, "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"}
     time.sleep(REQUEST_PAUSE)
     
-    # Ограничиваем ожидание, чтобы скрипт не висел часами
     response = requests.get(full_url, headers=headers, timeout=IMAGE_TIMEOUT)
     if response.status_code != 200:
         raise ApiError("Изображение недоступно: HTTP {0}".format(response.status_code))
