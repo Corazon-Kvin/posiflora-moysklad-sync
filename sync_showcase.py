@@ -145,7 +145,6 @@ class MoySkladClient(HttpClient):
         self.token = token
 
     def build_headers(self):
-        # Исправлено значение Accept согласно требованиям API МоегоСклада
         return {
             "Authorization": f"Bearer {self.token}", 
             "Accept": "application/json;charset=utf-8", 
@@ -159,6 +158,11 @@ class MoySkladClient(HttpClient):
             params = {"limit": limit, "offset": offset}
             if extra_params: params.update(extra_params)
             body = self.request("GET", path, params=params)
+            
+            # Защита от эндпоинтов, возвращающих список напрямую (например, pricetype)
+            if isinstance(body, list):
+                return body
+                
             batch = body.get("rows", [])
             rows.extend(batch)
             if len(batch) < limit: break
