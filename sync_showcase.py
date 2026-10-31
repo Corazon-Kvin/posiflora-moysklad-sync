@@ -184,7 +184,8 @@ def download_image(url, base_url):
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 def fetch_showcase_bouquets(posiflora):
-    rows, included = posiflora.paginate("/bouquets", {"include": "logo,prices", "sort": "-createdAt", "page[size]": 100}, MAX_PAGES)
+    # Убрали 'prices' из списка include, так как Posiflora больше это не поддерживает
+    rows, included = posiflora.paginate("/bouquets", {"include": "logo", "sort": "-createdAt", "page[size]": 100}, MAX_PAGES)
     idx = build_included_index(included)
     res = []
     for r in rows:
@@ -198,7 +199,8 @@ def fetch_showcase_bouquets(posiflora):
         if re.match(r"^\d{3,4}$", name): name = f"Букет {name}"
         if not re.search(r"букет", name, re.IGNORECASE) and not name.isdigit(): continue
         
-        price = pick_price(attrs) or pick_price(resolve_ref(r.get("relationships", {}).get("prices", {}).get("data", [{}])[0], idx).get("attributes") if resolve_ref(r.get("relationships", {}).get("prices", {}).get("data", [{}])[0], idx) else None)
+        # Берем цену напрямую из атрибутов
+        price = pick_price(attrs)
         if price <= 0: continue
         
         res.append({
