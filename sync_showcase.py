@@ -294,7 +294,11 @@ def main():
                     stats["archived"] += 1
 
         # 6. Остатки: всем актуальным = 1, архивным = 0
-        current_stocks = ms.request("GET", "/report/stock/bystore/current", params={"filter": f"storeId={config['TARGET_STORE_ID']}"}).get("rows", [])
+        stock_resp = ms.request("GET", "/report/stock/bystore/current", params={"filter": f"storeId={config['TARGET_STORE_ID']}"})
+        
+        # Защита от прямого списка
+        current_stocks = stock_resp if isinstance(stock_resp, list) else stock_resp.get("rows", [])
+        
         stock_dict = {s.get("assortmentId") or s.get("meta", {}).get("href", "").split("/")[-1]: safe_float(s.get("stock")) for s in current_stocks}
         
         enters, losses = [], []
