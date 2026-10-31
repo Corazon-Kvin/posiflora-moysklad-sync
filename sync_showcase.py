@@ -21,9 +21,9 @@ from PIL import Image
 # КОНСТАНТЫ
 # -----------------------------------------------------------------------------
 REQUEST_PAUSE = 0.05
-MAX_RETRIES = 3
-HTTP_TIMEOUT = 15  # Быстрый таймаут для API
-IMAGE_TIMEOUT = 5  # Жесткий таймаут для фото
+MAX_RETRIES = 5
+HTTP_TIMEOUT = 60  # Увеличен таймаут из-за долгой отдачи каталога МоимСкладом
+IMAGE_TIMEOUT = 10 # Увеличен таймаут для загрузки тяжелых фото
 MAX_PAGES = 5      # Глубина сканирования Posiflora (5 страниц = 500 свежих букетов)
 DOCUMENT_CHUNK_SIZE = 500
 IMAGE_MAX_SIDE = 1200
@@ -184,7 +184,6 @@ def download_image(url, base_url):
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 def fetch_showcase_bouquets(posiflora):
-    # Убрали 'prices' из списка include, так как Posiflora больше это не поддерживает
     rows, included = posiflora.paginate("/bouquets", {"include": "logo", "sort": "-createdAt", "page[size]": 100}, MAX_PAGES)
     idx = build_included_index(included)
     res = []
@@ -237,7 +236,7 @@ def main():
         price_types = ms.list_entities("/context/companysettings/pricetype")
         price_meta = next((pt["meta"] for pt in price_types if pt.get("name", "").lower() == "цена продажи"), price_types[0]["meta"])
 
-        # 2. Выгружаем все товары и отфильтровываем папку "Витрина" через Python (защита от ошибки 412)
+        # 2. Выгружаем все товары и отфильтровываем папку "Витрина" через Python
         all_products = ms.list_entities("/entity/product", {"includeArchived": "true"})
         ms_products = [p for p in all_products if p.get("productFolder", {}).get("meta", {}).get("href") == showcase_meta["href"]]
         ms_index = {str(p.get("externalCode")): p for p in ms_products}
