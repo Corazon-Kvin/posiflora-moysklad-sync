@@ -22,9 +22,9 @@ from PIL import Image
 # -----------------------------------------------------------------------------
 REQUEST_PAUSE = 0.05
 MAX_RETRIES = 5
-HTTP_TIMEOUT = 60  # Увеличен таймаут из-за долгой отдачи каталога МоимСкладом
-IMAGE_TIMEOUT = 10 # Увеличен таймаут для загрузки тяжелых фото
-MAX_PAGES = 5      # Глубина сканирования Posiflora (5 страниц = 500 свежих букетов)
+HTTP_TIMEOUT = 60  
+IMAGE_TIMEOUT = 10 
+MAX_PAGES = 5      
 DOCUMENT_CHUNK_SIZE = 500
 IMAGE_MAX_SIDE = 1200
 IMAGE_JPEG_QUALITY = 85
@@ -59,8 +59,13 @@ def resolve_ref(ref, included_index):
     return included_index.get((ref.get("type"), str(ref.get("id"))))
 
 def pick_price(attributes):
+    if not attributes: return 0.0
     for key in ("price", "salePrice", "retailPrice", "sellingPrice", "value", "amount", "totalAmount"):
-        val = safe_float((attributes or {}).get(key))
+        val = attributes.get(key)
+        # Если цена спрятана во вложенном словаре (например, {"amount": 5000, "currency": "RUB"})
+        if isinstance(val, dict):
+            val = val.get("amount") or val.get("value")
+        val = safe_float(val)
         if val > 0: return val
     return 0.0
 
@@ -187,26 +192,34 @@ def fetch_showcase_bouquets(posiflora):
     rows, included = posiflora.paginate("/bouquets", {"include": "logo", "sort": "-createdAt", "page[size]": 100}, MAX_PAGES)
     idx = build_included_index(included)
     res = []
+    
+    skipped_status = 0
+    skipped_price = 0
+    
     for r in rows:
         attrs = r.get("attributes", {})
-        if not attrs.get("onWindowAt"): continue # Только выставленные на витрину
-        
         status = str(attrs.get("status") or attrs.get("state") or "").strip().lower()
-        if status not in ("assembled", "on_window"): continue # Только собранные (исключаем проданные)
         
-        name = str(attrs.get("title") or attrs.get("name") or "").strip()
+        # Расширенное условие: разрешаем, если есть onWindowAt ИЛИ статус готовности
+        is_on_window = bool(attrs.get("onWindowAt")) or (status in ("assembled", "on_window", "ready", "showcase"))
+        if not is_on_window: 
+            skipped_status += 1
+            continue 
+        
+        name = str(attrs.get("title") or attrs.get("name") or "Без названия").strip()
         if re.match(r"^\d{3,4}$", name): name = f"Букет {name}"
-        if not re.search(r"букет", name, re.IGNORECASE) and not name.isdigit(): continue
         
-        # Берем цену напрямую из атрибутов
         price = pick_price(attrs)
-        if price <= 0: continue
+        if price <= 0: 
+            skipped_price += 1
+            continue
         
         res.append({
             "id": str(r.get("id")), "name": name, "price_kopecks": int(round(price * 100)),
             "image_url": logo_from_included(r, idx)
         })
-    LOG.info("Posiflora: Найдено %s актуальных букетов на витрине.", len(res))
+        
+    LOG.info(f"Posiflora: Найдено {len(res)} букетов на витрине. Пропущено (не витрина): {skipped_status}, пропущено (нет цены): {skipped_price}")
     return res
 
 def main():
@@ -224,7 +237,6 @@ def main():
         pf = PosifloraClient(config["POSIFLORA_URL"], config["POSIFLORA_USER"], config["POSIFLORA_PASS"])
         pf.login()
 
-        # 1. Находим метаданные папки "Витрина Tilda" и типа цены
         folders = ms.list_entities("/entity/productfolder")
         showcase_meta = None
         for f in folders:
@@ -236,18 +248,15 @@ def main():
         price_types = ms.list_entities("/context/companysettings/pricetype")
         price_meta = next((pt["meta"] for pt in price_types if pt.get("name", "").lower() == "цена продажи"), price_types[0]["meta"])
 
-        # 2. Выгружаем все товары и отфильтровываем папку "Витрина" через Python
         all_products = ms.list_entities("/entity/product", {"includeArchived": "true"})
         ms_products = [p for p in all_products if p.get("productFolder", {}).get("meta", {}).get("href") == showcase_meta["href"]]
         ms_index = {str(p.get("externalCode")): p for p in ms_products}
         
-        # 3. Выгружаем актуальные букеты с витрины Posiflora
         pf_bouquets = fetch_showcase_bouquets(pf)
         pf_active_codes = {b["id"] for b in pf_bouquets}
 
         stats = {"created": 0, "updated": 0, "archived": 0, "img_ok": 0, "img_err": 0}
 
-        # 4. Создаем и обновляем букеты
         for b in pf_bouquets:
             existing = ms_index.get(b["id"])
             payload = {}
@@ -286,24 +295,18 @@ def main():
                     stats["img_err"] += 1
                     LOG.warning(f"Не удалось загрузить фото для {b['name']}: {e}")
 
-        # 5. Архивируем те, что ушли с витрины
         for code, p in ms_index.items():
             if code not in pf_active_codes and not p.get("archived"):
                 if not dry_run:
                     ms.request("PUT", f"/entity/product/{p['id']}", json_body={"archived": True})
                     stats["archived"] += 1
 
-        # 6. Остатки: всем актуальным = 1, архивным = 0
         stock_resp = ms.request("GET", "/report/stock/bystore/current", params={"filter": f"storeId={config['TARGET_STORE_ID']}"})
-        
-        # Защита от прямого списка
         current_stocks = stock_resp if isinstance(stock_resp, list) else stock_resp.get("rows", [])
-        
         stock_dict = {s.get("assortmentId") or s.get("meta", {}).get("href", "").split("/")[-1]: safe_float(s.get("stock")) for s in current_stocks}
         
         enters, losses = [], []
         
-        # Обновляем индекс после создания для расчета остатков (через безопасную фильтрацию)
         all_products_after = ms.list_entities("/entity/product", {"includeArchived": "true"})
         ms_products = [p for p in all_products_after if p.get("productFolder", {}).get("meta", {}).get("href") == showcase_meta["href"]]
 
