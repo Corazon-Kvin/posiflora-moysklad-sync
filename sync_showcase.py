@@ -156,7 +156,6 @@ class MoySkladClient(HttpClient):
         }
 
     def list_entities(self, path, extra_params=None):
-        # Жестко ограничиваем порции по 100 штук, чтобы сервер МоегоСклада не зависал
         offset, limit = 0, 100
         out = []
         while True:
@@ -199,7 +198,8 @@ def fetch_showcase_bouquets(posiflora):
         attrs = r.get("attributes", {})
         status = str(attrs.get("status") or attrs.get("state") or "").strip().lower()
         
-        is_on_window = bool(attrs.get("onWindowAt")) or (status in ("assembled", "on_window", "ready", "showcase"))
+        # СТРОГИЙ ФИЛЬТР: Берем только те, что физически лежат на витрине
+        is_on_window = bool(attrs.get("onWindowAt")) or bool(attrs.get("onWindow")) or (status == "on_window")
         if not is_on_window: 
             skipped_status += 1
             continue 
@@ -246,6 +246,7 @@ def main():
         price_types = ms.list_entities("/context/companysettings/pricetype")
         price_meta = next((pt["meta"] for pt in price_types if pt.get("name", "").lower() == "цена продажи"), price_types[0]["meta"])
 
+        # Запрашиваем каталог до изменений
         all_products = ms.list_entities("/entity/product", {"includeArchived": "true"})
         ms_products = [p for p in all_products if p.get("productFolder", {}).get("meta", {}).get("href") == showcase_meta["href"]]
         ms_index = {str(p.get("externalCode")): p for p in ms_products}
@@ -255,6 +256,7 @@ def main():
 
         stats = {"created": 0, "updated": 0, "archived": 0, "img_ok": 0, "img_err": 0}
 
+        # Создаем и обновляем
         for b in pf_bouquets:
             existing = ms_index.get(b["id"])
             payload = {}
@@ -281,6 +283,8 @@ def main():
                 if not dry_run:
                     created = ms.request("POST", "/entity/product", json_body=payload)
                     prod_id = created["id"]
+                    # Добавляем созданный товар в индекс памяти, чтобы мгновенно посчитать ему остаток без запроса к серверу
+                    ms_index[b["id"]] = created
                     stats["created"] += 1
                 has_image = False
 
@@ -293,37 +297,43 @@ def main():
                     stats["img_err"] += 1
                     LOG.warning(f"Не удалось загрузить фото для {b['name']}: {e}")
 
+        # Архивируем неактуальные (в том числе те 360+ лишних букетов)
         for code, p in ms_index.items():
             if code not in pf_active_codes and not p.get("archived"):
                 if not dry_run:
                     ms.request("PUT", f"/entity/product/{p['id']}", json_body={"archived": True})
                     stats["archived"] += 1
 
+        # ОСТАТКИ (с защитой от отсутствия индексации)
         stock_resp = ms.request("GET", "/report/stock/bystore/current", params={"filter": f"storeId={config['TARGET_STORE_ID']}"})
         current_stocks = stock_resp if isinstance(stock_resp, list) else stock_resp.get("rows", [])
         stock_dict = {s.get("assortmentId") or s.get("meta", {}).get("href", "").split("/")[-1]: safe_float(s.get("stock")) for s in current_stocks}
         
         enters, losses = [], []
         
-        # Чтобы не дергать базу второй раз, используем те же отфильтрованные товары, обновив их состояния локально
-        for p in ms_products:
-            is_active = str(p.get("externalCode")) in pf_active_codes
+        for code, p in ms_index.items():
+            is_active = code in pf_active_codes
             target_qty = 1.0 if is_active else 0.0
             curr_qty = stock_dict.get(p["id"], 0.0)
             diff = round(target_qty - curr_qty, 3)
             
-            if diff > 0: enters.append({"assortment": {"meta": p["meta"]}, "quantity": diff, "price": 0})
-            elif diff < 0 and curr_qty > 0: losses.append({"assortment": {"meta": p["meta"]}, "quantity": min(abs(diff), curr_qty), "price": 0})
+            if diff > 0: 
+                enters.append({"assortment": {"meta": p["meta"]}, "quantity": diff, "price": 0})
+            elif diff < 0 and curr_qty > 0: 
+                losses.append({"assortment": {"meta": p["meta"]}, "quantity": min(abs(diff), curr_qty), "price": 0})
 
         org = {"href": f"{config['MOYSKLAD_URL']}/entity/organization/{config['ORG_ID']}", "type": "organization", "mediaType": "application/json"}
         store = {"href": f"{config['MOYSKLAD_URL']}/entity/store/{config['TARGET_STORE_ID']}", "type": "store", "mediaType": "application/json"}
 
+        # Отправляем остатки пачками по 100 штук, чтобы МойСклад не захлебнулся
         if enters and not dry_run:
-            ms.request("POST", "/entity/enter", json_body={"organization": {"meta": org}, "store": {"meta": store}, "applicable": True, "positions": enters})
+            for i in range(0, len(enters), 100):
+                ms.request("POST", "/entity/enter", json_body={"organization": {"meta": org}, "store": {"meta": store}, "applicable": True, "positions": enters[i:i+100]})
         if losses and not dry_run:
-            ms.request("POST", "/entity/loss", json_body={"organization": {"meta": org}, "store": {"meta": store}, "applicable": True, "positions": losses})
+            for i in range(0, len(losses), 100):
+                ms.request("POST", "/entity/loss", json_body={"organization": {"meta": org}, "store": {"meta": store}, "applicable": True, "positions": losses[i:i+100]})
 
-        LOG.info(f"Остатки: оприходовано {len(enters)}, списано {len(losses)}")
+        LOG.info(f"Остатки: оприходовано {len(enters)} позиций, списано {len(losses)} позиций")
         LOG.info(f"Итоги витрины: {stats}")
 
     except Exception as e:
