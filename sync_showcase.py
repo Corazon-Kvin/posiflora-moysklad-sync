@@ -31,7 +31,6 @@ IMAGE_JPEG_QUALITY = 85
 
 BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
-# Нас интересует только одна папка
 SHOWCASE_KEYWORDS = ["витрина tilda", "витрина"]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
@@ -62,7 +61,6 @@ def pick_price(attributes):
     if not attributes: return 0.0
     for key in ("price", "salePrice", "retailPrice", "sellingPrice", "value", "amount", "totalAmount"):
         val = attributes.get(key)
-        # Если цена спрятана во вложенном словаре (например, {"amount": 5000, "currency": "RUB"})
         if isinstance(val, dict):
             val = val.get("amount") or val.get("value")
         val = safe_float(val)
@@ -158,7 +156,8 @@ class MoySkladClient(HttpClient):
         }
 
     def list_entities(self, path, extra_params=None):
-        rows, offset, limit = 1000, 0, 1000
+        # Жестко ограничиваем порции по 100 штук, чтобы сервер МоегоСклада не зависал
+        offset, limit = 0, 100
         out = []
         while True:
             params = {"limit": limit, "offset": offset}
@@ -200,7 +199,6 @@ def fetch_showcase_bouquets(posiflora):
         attrs = r.get("attributes", {})
         status = str(attrs.get("status") or attrs.get("state") or "").strip().lower()
         
-        # Расширенное условие: разрешаем, если есть onWindowAt ИЛИ статус готовности
         is_on_window = bool(attrs.get("onWindowAt")) or (status in ("assembled", "on_window", "ready", "showcase"))
         if not is_on_window: 
             skipped_status += 1
@@ -307,9 +305,7 @@ def main():
         
         enters, losses = [], []
         
-        all_products_after = ms.list_entities("/entity/product", {"includeArchived": "true"})
-        ms_products = [p for p in all_products_after if p.get("productFolder", {}).get("meta", {}).get("href") == showcase_meta["href"]]
-
+        # Чтобы не дергать базу второй раз, используем те же отфильтрованные товары, обновив их состояния локально
         for p in ms_products:
             is_active = str(p.get("externalCode")) in pf_active_codes
             target_qty = 1.0 if is_active else 0.0
