@@ -153,21 +153,21 @@ class MoySkladClient(HttpClient):
         }
 
     def list_entities(self, path, extra_params=None):
-        rows, offset, limit = [], 0, 1000
+        rows, offset, limit = 1000, 0, 1000
+        out = []
         while True:
             params = {"limit": limit, "offset": offset}
             if extra_params: params.update(extra_params)
             body = self.request("GET", path, params=params)
             
-            # Защита от эндпоинтов, возвращающих список напрямую (например, pricetype)
             if isinstance(body, list):
                 return body
                 
             batch = body.get("rows", [])
-            rows.extend(batch)
+            out.extend(batch)
             if len(batch) < limit: break
             offset += limit
-        return rows
+        return out
 
 # -----------------------------------------------------------------------------
 # ЛОГИКА
@@ -235,11 +235,9 @@ def main():
         price_types = ms.list_entities("/context/companysettings/pricetype")
         price_meta = next((pt["meta"] for pt in price_types if pt.get("name", "").lower() == "цена продажи"), price_types[0]["meta"])
 
-        # 2. Выгружаем товары ТОЛЬКО из папки "Витрина Tilda" (очень быстро)
-        ms_products = ms.list_entities("/entity/product", {
-            "filter": f"productFolder={showcase_meta['href']}",
-            "includeArchived": "true"
-        })
+        # 2. Выгружаем все товары и отфильтровываем папку "Витрина" через Python (защита от ошибки 412)
+        all_products = ms.list_entities("/entity/product", {"includeArchived": "true"})
+        ms_products = [p for p in all_products if p.get("productFolder", {}).get("meta", {}).get("href") == showcase_meta["href"]]
         ms_index = {str(p.get("externalCode")): p for p in ms_products}
         
         # 3. Выгружаем актуальные букеты с витрины Posiflora
@@ -300,8 +298,10 @@ def main():
         
         enters, losses = [], []
         
-        # Обновляем индекс после создания для расчета остатков
-        ms_products = ms.list_entities("/entity/product", {"filter": f"productFolder={showcase_meta['href']}", "includeArchived": "true"})
+        # Обновляем индекс после создания для расчета остатков (через безопасную фильтрацию)
+        all_products_after = ms.list_entities("/entity/product", {"includeArchived": "true"})
+        ms_products = [p for p in all_products_after if p.get("productFolder", {}).get("meta", {}).get("href") == showcase_meta["href"]]
+
         for p in ms_products:
             is_active = str(p.get("externalCode")) in pf_active_codes
             target_qty = 1.0 if is_active else 0.0
