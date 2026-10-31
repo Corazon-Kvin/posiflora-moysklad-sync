@@ -145,7 +145,13 @@ class MoySkladClient(HttpClient):
         self.token = token
 
     def build_headers(self):
-        return {"Authorization": f"Bearer {self.token}", "Accept": "application/json", "Content-Type": "application/json", "Accept-Encoding": "gzip"}
+        # Исправлено значение Accept согласно требованиям API МоегоСклада
+        return {
+            "Authorization": f"Bearer {self.token}", 
+            "Accept": "application/json;charset=utf-8", 
+            "Content-Type": "application/json", 
+            "Accept-Encoding": "gzip"
+        }
 
     def list_entities(self, path, extra_params=None):
         rows, offset, limit = [], 0, 1000
