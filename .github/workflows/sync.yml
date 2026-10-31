@@ -21,17 +21,6 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    # Переменные заданы глобально для всей задачи (Job)
-    env:
-      POSIFLORA_USER: ${{ secrets.POSIFLORA_USER }}
-      POSIFLORA_PASS: ${{ secrets.POSIFLORA_PASS }}
-      POSIFLORA_STORE_ID: ${{ secrets.POSIFLORA_STORE_ID }}
-      POSIFLORA_URL: ${{ secrets.POSIFLORA_URL }}
-      MOYSKLAD_TOKEN: ${{ secrets.MOYSKLAD_TOKEN }}
-      MOYSKLAD_URL: ${{ secrets.MOYSKLAD_URL }}
-      TARGET_STORE_ID: ${{ secrets.TARGET_STORE_ID }}
-      ORG_ID: ${{ secrets.ORG_ID }}
-      
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -48,6 +37,15 @@ jobs:
 
       - name: Run automated scheduled script
         if: github.event_name == 'schedule'
+        env:
+          POSIFLORA_USER: ${{ secrets.POSIFLORA_USER }}
+          POSIFLORA_PASS: ${{ secrets.POSIFLORA_PASS }}
+          POSIFLORA_STORE_ID: ${{ secrets.POSIFLORA_STORE_ID }}
+          POSIFLORA_URL: ${{ secrets.POSIFLORA_URL }}
+          MOYSKLAD_TOKEN: ${{ secrets.MOYSKLAD_TOKEN }}
+          MOYSKLAD_URL: ${{ secrets.MOYSKLAD_URL }}
+          TARGET_STORE_ID: ${{ secrets.TARGET_STORE_ID }}
+          ORG_ID: ${{ secrets.ORG_ID }}
         run: |
           if [[ "${{ github.event.schedule }}" == "*/30 * * * *" ]]; then
             python sync_showcase.py
@@ -61,5 +59,14 @@ jobs:
 
       - name: Run manual script
         if: github.event_name == 'workflow_dispatch'
+        env:
+          POSIFLORA_USER: ${{ secrets.POSIFLORA_USER }}
+          POSIFLORA_PASS: ${{ secrets.POSIFLORA_PASS }}
+          POSIFLORA_STORE_ID: ${{ secrets.POSIFLORA_STORE_ID }}
+          POSIFLORA_URL: ${{ secrets.POSIFLORA_URL }}
+          MOYSKLAD_TOKEN: ${{ secrets.MOYSKLAD_TOKEN }}
+          MOYSKLAD_URL: ${{ secrets.MOYSKLAD_URL }}
+          TARGET_STORE_ID: ${{ secrets.TARGET_STORE_ID }}
+          ORG_ID: ${{ secrets.ORG_ID }}
         run: |
           python ${{ inputs.script_to_run }}
