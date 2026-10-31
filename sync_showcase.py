@@ -199,8 +199,13 @@ def fetch_showcase_bouquets(posiflora):
     return res
 
 def main():
-    config = {k: os.environ.get(k, "").strip() for k in ["POSIFLORA_USER", "POSIFLORA_PASS", "POSIFLORA_URL", "MOYSKLAD_TOKEN", "MOYSKLAD_URL", "TARGET_STORE_ID", "ORG_ID"]}
-    if not all(config.values()): sys.exit("Ошибка: не заданы переменные окружения.")
+    keys = ["POSIFLORA_USER", "POSIFLORA_PASS", "POSIFLORA_URL", "MOYSKLAD_TOKEN", "MOYSKLAD_URL", "TARGET_STORE_ID", "ORG_ID"]
+    config = {k: os.environ.get(k, "").strip() for k in keys}
+    
+    missing = [k for k, v in config.items() if not v]
+    if missing: 
+        sys.exit(f"Ошибка: не заданы переменные окружения: {', '.join(missing)}")
+        
     dry_run = env_bool("DRY_RUN")
 
     try:
