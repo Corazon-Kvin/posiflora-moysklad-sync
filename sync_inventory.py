@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # Скрипт 2: ИНВЕНТАРЬ И ОСТАТКИ (sync_inventory.py)
-# Задача: Синхронизация каталога штучных товаров, распределение по строгим категориям, выравнивание остатков, изоляция рецептов.
+# Задача: Синхронизация каталога штучных товаров, распределение по строгим категориям, выравнивание остатков, строгая изоляция рецептов.
 # Запуск: Каждые 2-3 часа.
 
 import base64
@@ -34,14 +34,14 @@ BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 
 # Строгое сопоставление категорий (по ТЗ)
 MS_FOLDER_KEYWORDS = {
-    "author": ["авторские букеты", "рецепты"],
+    "author": ["авторские букеты", "рецепты"], # Используется только для поиска папки в МоемСкладе
     "vase": ["вазы", "ваза"],
-    "toy": ["игрушки", "игрушк"],
-    "packaging": ["подарочные коробки", "упаковк", "лента", "коробка"],
+    "toy": ["игрушки", "игрушк", "медведь", "заяц"],
+    "packaging": ["подарочные коробки", "упаковк", "лента", "коробка", "пакет", "крафт", "открытка", "конверт", "бумага", "сумка"],
     "candlestick": ["подсвечники", "подсвечник"],
-    "candle": ["свечи", "свеч"],
-    "flower": ["цветы", "срезка", "зелень", "роза", "хризантема", "питоспорум", "гвоздика", "антирринум"],
-    "balloon": ["шары", "шар", "сфера", "баблс"]
+    "candle": ["свечи", "свеч", "цифра"],
+    "flower": ["цветы", "срезка", "зелень", "роза", "хризантема", "питоспорум", "гвоздика", "антирринум", "диантус", "эвкалипт", "гипсофила"],
+    "balloon": ["шары", "шар", "сфера", "баблс", "фольга", "бабл"]
 }
 
 # Игнорируем сырье и кофейный мусор
@@ -232,6 +232,7 @@ def match_category(name, cat_title):
     text_to_check = f"{name} {cat_title}"
     low = normalize_name(text_to_check)
     for cat_key, keywords in MS_FOLDER_KEYWORDS.items():
+        if cat_key == "author": continue # Авторские букеты обрабатываются отдельно
         for kw in keywords:
             if kw in low: return cat_key
     return None
@@ -241,13 +242,7 @@ def fetch_inventory_from_pf(pf, store_id):
     idx = build_included_index(included)
     res = []
     
-    # Собираем все ID физических товаров, чтобы потом вычесть их из каталога
-    all_inventory_ids = set()
-    
     for r in rows:
-        item_id = str(r.get("id"))
-        all_inventory_ids.add(item_id)
-        
         attrs = r.get("attributes", {})
         name = str(attrs.get("title") or attrs.get("name") or "").strip()
         if not name or is_blacklisted(name): continue
@@ -262,42 +257,51 @@ def fetch_inventory_from_pf(pf, store_id):
         if not mapped_cat: continue 
         
         price = extract_safe_price(r, attrs, idx)
+        item_id = str(r.get("id"))
         qty = pf.get_inventory_qty(item_id, store_id)
         
         res.append({
             "id": item_id, "name": name, "price_kopecks": int(round(price * 100)),
             "image_url": logo_from_included(r, idx), "category": mapped_cat, "qty": qty
         })
-    LOG.info(f"Posiflora: Отобрано {len(res)} целевых штучных товаров. Всего инвентаря в базе: {len(all_inventory_ids)}")
-    return res, all_inventory_ids
+    LOG.info(f"Posiflora: Отобрано {len(res)} целевых штучных товаров (/inventory-items).")
+    return res
 
-def fetch_catalog_from_pf(pf, store_id, inventory_ids):
+def fetch_catalog_from_pf(pf, store_id):
     rows, included = pf.paginate("/catalog", {"include": "category,logo,prices", "page[size]": 100}, MAX_PAGES)
     idx = build_included_index(included)
     res = []
     
     for r in rows:
-        item_id = str(r.get("id"))
-        
-        # МАГИЯ ЗДЕСЬ: Если товар есть в списке инвентаря (салфетки, шары и тд), мы его ПРОПУСКАЕМ.
-        # Таким образом остаются только чистые рецепты / авторские букеты.
-        if item_id in inventory_ids:
-            continue
-            
         attrs = r.get("attributes", {})
         name = str(attrs.get("title") or attrs.get("name") or "").strip()
         if not name or is_blacklisted(name): continue
         
-        mapped_cat = "author" 
+        cat_title = ""
+        cat_data = r.get("relationships", {}).get("category", {}).get("data")
+        cat_ref = resolve_ref(cat_data, idx)
+        if cat_ref: cat_title = str(cat_ref.get("attributes", {}).get("title", ""))
         
+        text_to_check = normalize_name(f"{name} {cat_title}")
+        
+        # ЖЕСТКИЙ ФИЛЬТР: Берем ТОЛЬКО букеты и композиции!
+        is_author = any(kw in text_to_check for kw in ["букет", "композици", "рецепт", "авторск"])
+        
+        # БЛОКИРОВКА МУСОРА: Если есть слова-паразиты, это точно не букет
+        is_junk = any(kw in text_to_check for kw in ["шар", "цифра", "свеча", "открытка", "пакет", "коробка", "лента", "доставка", "оформление", "сертификат", "гирлянда", "салфетк", "конверт", "стакан", "диффузор"])
+        
+        if not is_author or is_junk:
+            continue # Пропускаем весь мусор
+            
         price = extract_safe_price(r, attrs, idx)
+        item_id = str(r.get("id"))
         qty = pf.get_inventory_qty(item_id, store_id)
         
         res.append({
             "id": item_id, "name": name, "price_kopecks": int(round(price * 100)),
-            "image_url": logo_from_included(r, idx), "category": mapped_cat, "qty": qty
+            "image_url": logo_from_included(r, idx), "category": "author", "qty": qty
         })
-    LOG.info(f"Posiflora: Отобрано {len(res)} чистых рецептов из каталога.")
+    LOG.info(f"Posiflora: Отобрано {len(res)} чистых букетов/композиций из каталога (/catalog).")
     return res
 
 def main():
@@ -332,9 +336,9 @@ def main():
         ms_products = ms.list_entities("/entity/product", {"includeArchived": "false"})
         ms_index = {str(p.get("externalCode")): p for p in ms_products}
         
-        # 3. Выгружаем инвентарь и вычисляем чистые рецепты
-        pf_items, all_inventory_ids = fetch_inventory_from_pf(pf, config["TARGET_STORE_ID"])
-        pf_catalog = fetch_catalog_from_pf(pf, config["TARGET_STORE_ID"], all_inventory_ids)
+        # 3. Выгружаем данные
+        pf_items = fetch_inventory_from_pf(pf, config["TARGET_STORE_ID"])
+        pf_catalog = fetch_catalog_from_pf(pf, config["TARGET_STORE_ID"])
         
         pf_all = pf_items + pf_catalog
         stats = {"created": 0, "updated": 0, "archived_junk": 0, "img_ok": 0, "img_err": 0}
@@ -384,10 +388,10 @@ def main():
                 except Exception as e:
                     stats["img_err"] += 1
 
-        # 4.5. УБОРКА В ПАПКЕ АВТОРСКИХ БУКЕТОВ (Архивируем мусор)
+        # 4.5 ГЕНЕРАЛЬНАЯ УБОРКА: Удаляем мусор из папки Авторских букетов
         author_meta = folder_meta.get("author")
         if author_meta:
-            valid_author_ids = {b["id"] for b in pf_catalog}
+            valid_author_ids = {b["id"] for b in pf_catalog} # Только чистые букеты
             for code, p in ms_index.items():
                 if p.get("productFolder", {}).get("meta", {}).get("href") == author_meta["href"]:
                     if code not in valid_author_ids and not p.get("archived"):
