@@ -24,7 +24,7 @@ REQUEST_PAUSE = 0.05
 MAX_RETRIES = 5
 HTTP_TIMEOUT = 60  
 IMAGE_TIMEOUT = 10 
-MAX_PAGES = 10     # Увеличили глубину поиска до 1000 последних букетов для надежности
+MAX_PAGES = 20     # Увеличили глубину поиска до 2000 последних букетов для надежности
 DOCUMENT_CHUNK_SIZE = 500
 IMAGE_MAX_SIDE = 1200
 IMAGE_JPEG_QUALITY = 85
@@ -198,13 +198,13 @@ def fetch_showcase_bouquets(posiflora):
         attrs = r.get("attributes", {})
         status = str(attrs.get("status") or attrs.get("state") or "").strip().lower()
         
-        # 1. Жестко отсекаем проданные, разобранные и удаленные, даже если у них есть onWindowAt
+        # 1. Отсекаем только явно мертвые статусы
         if status in ("sold", "disassembled", "written_off", "deleted", "archived", "draft"):
             skipped_status += 1
             continue 
             
-        # 2. Из оставшихся (Собранные и т.д.) берем только те, что физически лежат на витрине
-        is_on_window = (attrs.get("onWindow") is True) or (status == "on_window") or (status == "assembled" and bool(attrs.get("onWindowAt")))
+        # 2. Если статус живой, проверяем наличие любого признака витрины
+        is_on_window = bool(attrs.get("onWindowAt")) or (attrs.get("onWindow") is True) or ("window" in status) or ("showcase" in status)
         
         if not is_on_window: 
             skipped_status += 1
@@ -302,7 +302,7 @@ def main():
                     stats["img_err"] += 1
                     LOG.warning(f"Не удалось загрузить фото для {b['name']}: {e}")
 
-        # 2. ОСТАТКИ (Сначала списываем у тех, что пропали с витрины)
+        # 2. ОСТАТКИ
         stock_resp = ms.request("GET", "/report/stock/bystore/current", params={"filter": f"storeId={config['TARGET_STORE_ID']}"})
         current_stocks = stock_resp if isinstance(stock_resp, list) else stock_resp.get("rows", [])
         stock_dict = {s.get("assortmentId") or s.get("meta", {}).get("href", "").split("/")[-1]: safe_float(s.get("stock")) for s in current_stocks}
@@ -330,7 +330,7 @@ def main():
             for i in range(0, len(losses), 100):
                 ms.request("POST", "/entity/loss", json_body={"organization": {"meta": org}, "store": {"meta": store}, "applicable": True, "positions": losses[i:i+100]})
 
-        # 3. АРХИВАЦИЯ (Архивируем только после того, как безопасно списали остаток)
+        # 3. АРХИВАЦИЯ
         for code, p in ms_index.items():
             if code not in pf_active_codes and not p.get("archived"):
                 if not dry_run:
