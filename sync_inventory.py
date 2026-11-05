@@ -31,7 +31,7 @@ IMAGE_JPEG_QUALITY = 85
 
 BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
-# Строгое сопоставление категорий (для штучных товаров)
+# Строгое сопоставление категорий
 MS_FOLDER_KEYWORDS = {
     "author": ["авторские букеты", "рецепты"], 
     "vase": ["вазы", "ваза"],
@@ -266,9 +266,8 @@ def fetch_inventory_from_pf(pf, store_id):
     return res
 
 def fetch_recipes_from_pf(pf, store_id):
-    # Прямой запрос к эндпоинту спецификаций (рецептов)
     try:
-        rows, included = pf.paginate("/specifications", {"include": "logo,prices", "page[size]": 100}, MAX_PAGES)
+        rows, included = pf.paginate("/specifications", {"include": "category,logo,prices", "page[size]": 100}, MAX_PAGES)
     except Exception as e:
         LOG.error(f"Posiflora: Ошибка при запросе рецептов (/specifications): {e}")
         return []
@@ -281,16 +280,28 @@ def fetch_recipes_from_pf(pf, store_id):
         name = str(attrs.get("title") or attrs.get("name") or "").strip()
         if not name or is_blacklisted(name): continue
         
+        # --- ДИАГНОСТИКА ЦЕНЫ ---
+        if "1706" in name:
+            LOG.info(f"\n=== СЫРОЙ JSON (РЕЦЕПТ /specifications): {name} ===\n{r}\n========================================================\n")
+        # ------------------------
+        
+        cat_title = ""
+        cat_data = r.get("relationships", {}).get("category", {}).get("data")
+        cat_ref = resolve_ref(cat_data, idx)
+        if cat_ref: cat_title = str(cat_ref.get("attributes", {}).get("title", ""))
+        
+        # Умное распределение: если в рецептах есть коробка, она уйдет в упаковку, иначе останется в букетах
+        mapped_cat = match_category(name, cat_title) or "author"
+        
         price = extract_safe_price(r, attrs, idx)
         item_id = str(r.get("id"))
         qty = pf.get_inventory_qty(item_id, store_id)
         
-        # Все рецепты без дополнительных проверок идут в категорию author
         res.append({
             "id": item_id, "name": name, "price_kopecks": int(round(price * 100)),
-            "image_url": logo_from_included(r, idx), "category": "author", "qty": qty
+            "image_url": logo_from_included(r, idx), "category": mapped_cat, "qty": qty
         })
-    LOG.info(f"Posiflora: Отобрано {len(res)} авторских букетов из раздела рецептов (/specifications).")
+    LOG.info(f"Posiflora: Отобрано {len(res)} позиций из раздела рецептов (/specifications).")
     return res
 
 def main():
@@ -380,7 +391,7 @@ def main():
         # 4.5 ГЕНЕРАЛЬНАЯ УБОРКА: Удаляем старый мусор из папки Авторских букетов
         author_meta = folder_meta.get("author")
         if author_meta:
-            valid_author_ids = {b["id"] for b in pf_recipes}
+            valid_author_ids = {b["id"] for b in pf_recipes if b["category"] == "author"}
             for code, p in ms_index.items():
                 if p.get("productFolder", {}).get("meta", {}).get("href") == author_meta["href"]:
                     if code not in valid_author_ids and not p.get("archived"):
