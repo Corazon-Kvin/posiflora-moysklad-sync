@@ -268,12 +268,20 @@ def main():
         pf = PosifloraClient(config["POSIFLORA_URL"], config["POSIFLORA_USER"], config["POSIFLORA_PASS"])
         pf.login()
 
-        # --- НАЧАЛО ОТЛАДКИ КАТАЛОГА ПРОДУКТОВ ---
-        try:
-            test_products = pf.request("GET", "/products", params={"page[size]": 2, "include": "logo,prices"})
-            LOG.info(f"\n=== СЫРОЙ JSON: PRODUCTS ===\n{test_products}\n========================")
-        except Exception as e:
-            LOG.info(f"\n=== ОШИБКА ЗАПРОСА /products: {e} ===\n")
+        # --- НАЧАЛО ОТЛАДКИ РЕЦЕПТОВ (РАДАР) ---
+        endpoints_to_try = [
+            "/catalog", "/assortment", "/templates", "/items", "/goods", 
+            "/recipe-items", "/catalog-items", "/bouquets-templates", "/variants"
+        ]
+        
+        LOG.info("\n=== ЗАПУСК РАДАРА ЭНДПОИНТОВ POSIFLORA ===")
+        for ep in endpoints_to_try:
+            try:
+                test_resp = pf.request("GET", ep, params={"page[size]": 1})
+                LOG.info(f"[УСПЕХ] Эндпоинт НАЙДЕН: {ep} -> Ответил без 404!")
+            except Exception as e:
+                pass # Игнорируем 404 ошибки для чистоты лога
+        LOG.info("=== РАДАР ЗАВЕРШЕН ===\n")
         # --- КОНЕЦ ОТЛАДКИ ---
 
         # 1. Маппинг папок МоегоСклада
