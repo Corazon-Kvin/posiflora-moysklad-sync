@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # Скрипт 2: ИНВЕНТАРЬ И ОСТАТКИ (sync_inventory.py)
-# Задача: Синхронизация каталога штучных товаров, распределение по строгим категориям, выравнивание остатков.
+# Задача: Синхронизация каталога штучных товаров, распределение по строгим категориям, выравнивание остатков, изоляция рецептов.
 # Запуск: Каждые 2-3 часа.
 
 import base64
@@ -34,7 +34,7 @@ BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 
 # Строгое сопоставление категорий (по ТЗ)
 MS_FOLDER_KEYWORDS = {
-    "author": ["авторские букеты", "рецепты", "композиции", "букеты", "каталог"],
+    "author": ["авторские букеты", "рецепты"],
     "vase": ["вазы", "ваза"],
     "toy": ["игрушки", "игрушк"],
     "packaging": ["подарочные коробки", "упаковк", "лента", "коробка"],
@@ -236,17 +236,18 @@ def match_category(name, cat_title):
             if kw in low: return cat_key
     return None
 
-def is_bouquet_or_recipe(name, cat_title):
-    text = normalize_name(f"{name} {cat_title}")
-    keywords = ["рецепт", "букет", "композиция"]
-    return any(kw in text for kw in keywords)
-
 def fetch_inventory_from_pf(pf, store_id):
     rows, included = pf.paginate("/inventory-items", {"include": "category,logo,prices", "page[size]": 100}, MAX_PAGES)
     idx = build_included_index(included)
     res = []
     
+    # Собираем все ID физических товаров, чтобы потом вычесть их из каталога
+    all_inventory_ids = set()
+    
     for r in rows:
+        item_id = str(r.get("id"))
+        all_inventory_ids.add(item_id)
+        
         attrs = r.get("attributes", {})
         name = str(attrs.get("title") or attrs.get("name") or "").strip()
         if not name or is_blacklisted(name): continue
@@ -261,49 +262,42 @@ def fetch_inventory_from_pf(pf, store_id):
         if not mapped_cat: continue 
         
         price = extract_safe_price(r, attrs, idx)
-        item_id = str(r.get("id"))
         qty = pf.get_inventory_qty(item_id, store_id)
         
         res.append({
             "id": item_id, "name": name, "price_kopecks": int(round(price * 100)),
             "image_url": logo_from_included(r, idx), "category": mapped_cat, "qty": qty
         })
-    LOG.info("Posiflora: Отобрано %s целевых штучных товаров (/inventory-items).", len(res))
-    return res
+    LOG.info(f"Posiflora: Отобрано {len(res)} целевых штучных товаров. Всего инвентаря в базе: {len(all_inventory_ids)}")
+    return res, all_inventory_ids
 
-def fetch_catalog_from_pf(pf, store_id):
+def fetch_catalog_from_pf(pf, store_id, inventory_ids):
     rows, included = pf.paginate("/catalog", {"include": "category,logo,prices", "page[size]": 100}, MAX_PAGES)
     idx = build_included_index(included)
     res = []
     
     for r in rows:
+        item_id = str(r.get("id"))
+        
+        # МАГИЯ ЗДЕСЬ: Если товар есть в списке инвентаря (салфетки, шары и тд), мы его ПРОПУСКАЕМ.
+        # Таким образом остаются только чистые рецепты / авторские букеты.
+        if item_id in inventory_ids:
+            continue
+            
         attrs = r.get("attributes", {})
         name = str(attrs.get("title") or attrs.get("name") or "").strip()
         if not name or is_blacklisted(name): continue
         
-        cat_title = ""
-        cat_data = r.get("relationships", {}).get("category", {}).get("data")
-        cat_ref = resolve_ref(cat_data, idx)
-        if cat_ref: cat_title = str(cat_ref.get("attributes", {}).get("title", ""))
-        if is_blacklisted(cat_title): continue
+        mapped_cat = "author" 
         
-        mapped_cat = match_category(name, cat_title)
-        
-        if mapped_cat == "author" and not is_bouquet_or_recipe(name, cat_title):
-             continue
-
-        if not mapped_cat:
-            continue
-            
         price = extract_safe_price(r, attrs, idx)
-        item_id = str(r.get("id"))
         qty = pf.get_inventory_qty(item_id, store_id)
         
         res.append({
             "id": item_id, "name": name, "price_kopecks": int(round(price * 100)),
             "image_url": logo_from_included(r, idx), "category": mapped_cat, "qty": qty
         })
-    LOG.info("Posiflora: Отобрано %s позиций из каталога рецептов (/catalog).", len(res))
+    LOG.info(f"Posiflora: Отобрано {len(res)} чистых рецептов из каталога.")
     return res
 
 def main():
@@ -334,17 +328,16 @@ def main():
         price_types = ms.list_entities("/context/companysettings/pricetype")
         price_meta = next((pt["meta"] for pt in price_types if pt.get("name", "").lower() == "цена продажи"), price_types[0]["meta"])
 
-        # 2. Выгружаем все товары МоегоСклада для сопоставления
+        # 2. Выгружаем все товары МоегоСклада
         ms_products = ms.list_entities("/entity/product", {"includeArchived": "false"})
         ms_index = {str(p.get("externalCode")): p for p in ms_products}
         
-        # 3. Выгружаем инвентарь и каталог из Posiflora
-        pf_items = fetch_inventory_from_pf(pf, config["TARGET_STORE_ID"])
-        pf_catalog = fetch_catalog_from_pf(pf, config["TARGET_STORE_ID"])
+        # 3. Выгружаем инвентарь и вычисляем чистые рецепты
+        pf_items, all_inventory_ids = fetch_inventory_from_pf(pf, config["TARGET_STORE_ID"])
+        pf_catalog = fetch_catalog_from_pf(pf, config["TARGET_STORE_ID"], all_inventory_ids)
         
         pf_all = pf_items + pf_catalog
-
-        stats = {"created": 0, "updated": 0, "img_ok": 0, "img_err": 0}
+        stats = {"created": 0, "updated": 0, "archived_junk": 0, "img_ok": 0, "img_err": 0}
 
         # 4. Обновление карточек в МоемСкладе
         for b in pf_all:
@@ -390,6 +383,17 @@ def main():
                     stats["img_ok"] += 1
                 except Exception as e:
                     stats["img_err"] += 1
+
+        # 4.5. УБОРКА В ПАПКЕ АВТОРСКИХ БУКЕТОВ (Архивируем мусор)
+        author_meta = folder_meta.get("author")
+        if author_meta:
+            valid_author_ids = {b["id"] for b in pf_catalog}
+            for code, p in ms_index.items():
+                if p.get("productFolder", {}).get("meta", {}).get("href") == author_meta["href"]:
+                    if code not in valid_author_ids and not p.get("archived"):
+                        if not dry_run:
+                            ms.request("PUT", f"/entity/product/{p['id']}", json_body={"archived": True})
+                            stats["archived_junk"] += 1
 
         # 5. Синхронизация остатков
         stock_resp = ms.request("GET", "/report/stock/bystore/current", params={"filter": f"storeId={config['TARGET_STORE_ID']}"})
