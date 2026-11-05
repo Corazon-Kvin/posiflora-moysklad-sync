@@ -34,7 +34,7 @@ BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 
 # Строгое сопоставление категорий (по ТЗ)
 MS_FOLDER_KEYWORDS = {
-    "author": ["авторские букеты", "рецепты"], # Используется только для поиска папки в МоемСкладе
+    "author": ["авторские букеты", "рецепты"], 
     "vase": ["вазы", "ваза"],
     "toy": ["игрушки", "игрушк", "медведь", "заяц"],
     "packaging": ["подарочные коробки", "упаковк", "лента", "коробка", "пакет", "крафт", "открытка", "конверт", "бумага", "сумка"],
@@ -232,7 +232,7 @@ def match_category(name, cat_title):
     text_to_check = f"{name} {cat_title}"
     low = normalize_name(text_to_check)
     for cat_key, keywords in MS_FOLDER_KEYWORDS.items():
-        if cat_key == "author": continue # Авторские букеты обрабатываются отдельно
+        if cat_key == "author": continue 
         for kw in keywords:
             if kw in low: return cat_key
     return None
@@ -270,8 +270,24 @@ def fetch_inventory_from_pf(pf, store_id):
 def fetch_catalog_from_pf(pf, store_id):
     rows, included = pf.paginate("/catalog", {"include": "category,logo,prices", "page[size]": 100}, MAX_PAGES)
     idx = build_included_index(included)
-    res = []
     
+    # --- НАЧАЛО ДИАГНОСТИКИ ---
+    unique_categories = set()
+    for r in rows:
+        cat_data = r.get("relationships", {}).get("category", {}).get("data")
+        cat_ref = resolve_ref(cat_data, idx)
+        if cat_ref:
+            cat_title = str(cat_ref.get("attributes", {}).get("title", ""))
+            if cat_title:
+                unique_categories.add(cat_title.strip())
+                
+    LOG.info("\n=== СПИСОК ВСЕХ КАТЕГОРИЙ В POSIFLORA (/catalog) ===")
+    for c in sorted(unique_categories):
+        LOG.info(f" -> {c}")
+    LOG.info("===================================================\n")
+    # --- КОНЕЦ ДИАГНОСТИКИ ---
+
+    res = []
     for r in rows:
         attrs = r.get("attributes", {})
         name = str(attrs.get("title") or attrs.get("name") or "").strip()
@@ -283,15 +299,11 @@ def fetch_catalog_from_pf(pf, store_id):
         if cat_ref: cat_title = str(cat_ref.get("attributes", {}).get("title", ""))
         
         text_to_check = normalize_name(f"{name} {cat_title}")
-        
-        # ЖЕСТКИЙ ФИЛЬТР: Берем ТОЛЬКО букеты и композиции!
         is_author = any(kw in text_to_check for kw in ["букет", "композици", "рецепт", "авторск"])
-        
-        # БЛОКИРОВКА МУСОРА: Если есть слова-паразиты, это точно не букет
         is_junk = any(kw in text_to_check for kw in ["шар", "цифра", "свеча", "открытка", "пакет", "коробка", "лента", "доставка", "оформление", "сертификат", "гирлянда", "салфетк", "конверт", "стакан", "диффузор"])
         
         if not is_author or is_junk:
-            continue # Пропускаем весь мусор
+            continue
             
         price = extract_safe_price(r, attrs, idx)
         item_id = str(r.get("id"))
@@ -388,16 +400,7 @@ def main():
                 except Exception as e:
                     stats["img_err"] += 1
 
-        # 4.5 ГЕНЕРАЛЬНАЯ УБОРКА: Удаляем мусор из папки Авторских букетов
-        author_meta = folder_meta.get("author")
-        if author_meta:
-            valid_author_ids = {b["id"] for b in pf_catalog} # Только чистые букеты
-            for code, p in ms_index.items():
-                if p.get("productFolder", {}).get("meta", {}).get("href") == author_meta["href"]:
-                    if code not in valid_author_ids and not p.get("archived"):
-                        if not dry_run:
-                            ms.request("PUT", f"/entity/product/{p['id']}", json_body={"archived": True})
-                            stats["archived_junk"] += 1
+        # 4.5 ГЕНЕРАЛЬНАЯ УБОРКА: Удаляем мусор из папки Авторских букетов (Временно отключено для диагностики)
 
         # 5. Синхронизация остатков
         stock_resp = ms.request("GET", "/report/stock/bystore/current", params={"filter": f"storeId={config['TARGET_STORE_ID']}"})
