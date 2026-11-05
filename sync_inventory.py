@@ -268,12 +268,12 @@ def main():
         pf = PosifloraClient(config["POSIFLORA_URL"], config["POSIFLORA_USER"], config["POSIFLORA_PASS"])
         pf.login()
 
-        # --- НАЧАЛО ОТЛАДКИ РЕЦЕПТОВ ---
+        # --- НАЧАЛО ОТЛАДКИ КАТАЛОГА ПРОДУКТОВ ---
         try:
-            test_recipes = pf.request("GET", "/recipes", params={"page[size]": 2, "include": "logo,prices"})
-            LOG.info(f"\n=== СЫРОЙ JSON: РЕЦЕПТЫ ===\n{test_recipes}\n========================")
+            test_products = pf.request("GET", "/products", params={"page[size]": 2, "include": "logo,prices"})
+            LOG.info(f"\n=== СЫРОЙ JSON: PRODUCTS ===\n{test_products}\n========================")
         except Exception as e:
-            LOG.info(f"\n=== ОШИБКА ЗАПРОСА РЕЦЕПТОВ: {e} ===\n")
+            LOG.info(f"\n=== ОШИБКА ЗАПРОСА /products: {e} ===\n")
         # --- КОНЕЦ ОТЛАДКИ ---
 
         # 1. Маппинг папок МоегоСклада
