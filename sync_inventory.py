@@ -34,14 +34,14 @@ BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 
 # Строгое сопоставление категорий (по ТЗ)
 MS_FOLDER_KEYWORDS = {
-    "author": ["авторские букеты", "рецепты"],
+    "author": ["авторские букеты", "рецепты", "композиции", "букеты", "каталог"],
     "vase": ["вазы", "ваза"],
     "toy": ["игрушки", "игрушк"],
-    "packaging": ["подарочные коробки", "упаковк"],
+    "packaging": ["подарочные коробки", "упаковк", "лента", "коробка"],
     "candlestick": ["подсвечники", "подсвечник"],
     "candle": ["свечи", "свеч"],
-    "flower": ["цветы"],
-    "balloon": ["шары", "шар"]
+    "flower": ["цветы", "срезка", "зелень", "роза", "хризантема", "питоспорум", "гвоздика", "антирринум"],
+    "balloon": ["шары", "шар", "сфера", "баблс"]
 }
 
 # Игнорируем сырье и кофейный мусор
@@ -89,7 +89,6 @@ def pick_price(attributes):
     return 0.0
 
 def extract_safe_price(row, attrs, idx):
-    # Безопасное извлечение цены
     p = pick_price(attrs)
     if p > 0: return p
     prices_data = row.get("relationships", {}).get("prices", {}).get("data")
@@ -277,8 +276,16 @@ def fetch_catalog_from_pf(pf, store_id):
         name = str(attrs.get("title") or attrs.get("name") or "").strip()
         if not name or is_blacklisted(name): continue
         
-        # Рецепты принудительно направляем в Авторские букеты
-        mapped_cat = "author" 
+        # Извлекаем категорию товара из каталога
+        cat_title = ""
+        cat_data = r.get("relationships", {}).get("category", {}).get("data")
+        cat_ref = resolve_ref(cat_data, idx)
+        if cat_ref: cat_title = str(cat_ref.get("attributes", {}).get("title", ""))
+        if is_blacklisted(cat_title): continue
+        
+        # Определяем папку назначения по имени и категории. 
+        # Если не подошло ни под одно правило, отправляем в Авторские букеты по умолчанию.
+        mapped_cat = match_category(name, cat_title) or "author"
         
         price = extract_safe_price(r, attrs, idx)
         item_id = str(r.get("id"))
@@ -327,7 +334,9 @@ def main():
         pf_items = fetch_inventory_from_pf(pf, config["TARGET_STORE_ID"])
         pf_catalog = fetch_catalog_from_pf(pf, config["TARGET_STORE_ID"])
         
+        # Объединяем штучный товар и рецепты в один общий список
         pf_all = pf_items + pf_catalog
+
         stats = {"created": 0, "updated": 0, "img_ok": 0, "img_err": 0}
 
         # 4. Обновление карточек в МоемСкладе
