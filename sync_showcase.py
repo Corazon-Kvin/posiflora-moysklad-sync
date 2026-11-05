@@ -24,7 +24,7 @@ REQUEST_PAUSE = 0.05
 MAX_RETRIES = 5
 HTTP_TIMEOUT = 60  
 IMAGE_TIMEOUT = 10 
-MAX_PAGES = 5      
+MAX_PAGES = 10     # Увеличили глубину поиска до 1000 последних букетов для надежности
 DOCUMENT_CHUNK_SIZE = 500
 IMAGE_MAX_SIDE = 1200
 IMAGE_JPEG_QUALITY = 85
@@ -198,8 +198,14 @@ def fetch_showcase_bouquets(posiflora):
         attrs = r.get("attributes", {})
         status = str(attrs.get("status") or attrs.get("state") or "").strip().lower()
         
-        # СТРОГИЙ ФИЛЬТР: Берем только те, что физически лежат на витрине
-        is_on_window = bool(attrs.get("onWindowAt")) or bool(attrs.get("onWindow")) or (status == "on_window")
+        # 1. Жестко отсекаем проданные, разобранные и удаленные, даже если у них есть onWindowAt
+        if status in ("sold", "disassembled", "written_off", "deleted", "archived", "draft"):
+            skipped_status += 1
+            continue 
+            
+        # 2. Из оставшихся (Собранные и т.д.) берем только те, что физически лежат на витрине
+        is_on_window = (attrs.get("onWindow") is True) or (status == "on_window") or (status == "assembled" and bool(attrs.get("onWindowAt")))
+        
         if not is_on_window: 
             skipped_status += 1
             continue 
@@ -217,7 +223,7 @@ def fetch_showcase_bouquets(posiflora):
             "image_url": logo_from_included(r, idx)
         })
         
-    LOG.info(f"Posiflora: Найдено {len(res)} букетов на витрине. Пропущено (не витрина): {skipped_status}, пропущено (нет цены): {skipped_price}")
+    LOG.info(f"Posiflora: Найдено {len(res)} букетов на витрине. Пропущено (не витрина/продано): {skipped_status}, пропущено (нет цены): {skipped_price}")
     return res
 
 def main():
@@ -296,7 +302,7 @@ def main():
                     stats["img_err"] += 1
                     LOG.warning(f"Не удалось загрузить фото для {b['name']}: {e}")
 
-        # 2. ОСТАТКИ (Сначала списываем, чтобы МойСклад не блокировал операцию на архивных товарах)
+        # 2. ОСТАТКИ (Сначала списываем у тех, что пропали с витрины)
         stock_resp = ms.request("GET", "/report/stock/bystore/current", params={"filter": f"storeId={config['TARGET_STORE_ID']}"})
         current_stocks = stock_resp if isinstance(stock_resp, list) else stock_resp.get("rows", [])
         stock_dict = {s.get("assortmentId") or s.get("meta", {}).get("href", "").split("/")[-1]: safe_float(s.get("stock")) for s in current_stocks}
