@@ -24,7 +24,7 @@ REQUEST_PAUSE = 0.05
 MAX_RETRIES = 5
 HTTP_TIMEOUT = 60  
 IMAGE_TIMEOUT = 10 
-MAX_PAGES = 20     # Увеличили глубину поиска до 2000 последних букетов для надежности
+MAX_PAGES = 20     
 DOCUMENT_CHUNK_SIZE = 500
 IMAGE_MAX_SIDE = 1200
 IMAGE_JPEG_QUALITY = 85
@@ -198,16 +198,8 @@ def fetch_showcase_bouquets(posiflora):
         attrs = r.get("attributes", {})
         status = str(attrs.get("status") or attrs.get("state") or "").strip().lower()
         
-        # --- НАЧАЛО ОТЛАДКИ ---
-        debug_name = str(attrs.get("title") or attrs.get("name") or "")
-        if "0412" in debug_name:
-            LOG.info(f"\n=== СЫРОЙ JSON: АКТУАЛЬНЫЙ БУКЕТ 0412 ===\n{r}\n========================")
-        if "2505" in debug_name:
-            LOG.info(f"\n=== СЫРОЙ JSON: ЛИШНИЙ БУКЕТ 2505 ===\n{r}\n========================")
-        # --- КОНЕЦ ОТЛАДКИ ---
-        
-        # 1. Отсекаем только явно мертвые статусы
-        if status in ("sold", "disassembled", "written_off", "deleted", "archived", "draft"):
+        # 1. Отсекаем явно мертвые статусы (включая 'purchased')
+        if status in ("sold", "purchased", "disassembled", "written_off", "deleted", "archived", "draft", "canceled"):
             skipped_status += 1
             continue 
             
@@ -218,7 +210,7 @@ def fetch_showcase_bouquets(posiflora):
             skipped_status += 1
             continue 
         
-        name = debug_name.strip()
+        name = str(attrs.get("title") or attrs.get("name") or "Без названия").strip()
         if re.match(r"^\d{3,4}$", name): name = f"Букет {name}"
         
         price = pick_price(attrs)
@@ -310,7 +302,7 @@ def main():
                     stats["img_err"] += 1
                     LOG.warning(f"Не удалось загрузить фото для {b['name']}: {e}")
 
-        # 2. ОСТАТКИ
+        # 2. ОСТАТКИ (Сначала списываем у тех, что пропали с витрины)
         stock_resp = ms.request("GET", "/report/stock/bystore/current", params={"filter": f"storeId={config['TARGET_STORE_ID']}"})
         current_stocks = stock_resp if isinstance(stock_resp, list) else stock_resp.get("rows", [])
         stock_dict = {s.get("assortmentId") or s.get("meta", {}).get("href", "").split("/")[-1]: safe_float(s.get("stock")) for s in current_stocks}
