@@ -75,6 +75,7 @@ def build_included_index(included):
     return {(item.get("type"), str(item.get("id"))): item for item in (included or []) if isinstance(item, dict)}
 
 def resolve_ref(ref, included_index):
+    if not ref or not isinstance(ref, dict): return None
     return included_index.get((ref.get("type"), str(ref.get("id"))))
 
 def pick_price(attributes):
@@ -85,6 +86,19 @@ def pick_price(attributes):
             val = val.get("amount") or val.get("value")
         val = safe_float(val)
         if val > 0: return val
+    return 0.0
+
+def extract_safe_price(row, attrs, idx):
+    # Безопасное извлечение цены
+    p = pick_price(attrs)
+    if p > 0: return p
+    prices_data = row.get("relationships", {}).get("prices", {}).get("data")
+    if not prices_data: return 0.0
+    
+    ref_item = prices_data[0] if isinstance(prices_data, list) and len(prices_data) > 0 else prices_data
+    ref_obj = resolve_ref(ref_item, idx)
+    if ref_obj:
+        return pick_price(ref_obj.get("attributes"))
     return 0.0
 
 def logo_from_included(row, included_index):
@@ -234,15 +248,15 @@ def fetch_inventory_from_pf(pf, store_id):
         if not name or is_blacklisted(name): continue
         
         cat_title = ""
-        cat_ref = resolve_ref(r.get("relationships", {}).get("category", {}).get("data", {}), idx)
+        cat_data = r.get("relationships", {}).get("category", {}).get("data")
+        cat_ref = resolve_ref(cat_data, idx)
         if cat_ref: cat_title = str(cat_ref.get("attributes", {}).get("title", ""))
         if is_blacklisted(cat_title): continue
         
         mapped_cat = match_category(name, cat_title)
         if not mapped_cat: continue 
         
-        price = pick_price(attrs) or pick_price(resolve_ref(r.get("relationships", {}).get("prices", {}).get("data", [{}])[0], idx).get("attributes") if resolve_ref(r.get("relationships", {}).get("prices", {}).get("data", [{}])[0], idx) else None)
-        
+        price = extract_safe_price(r, attrs, idx)
         item_id = str(r.get("id"))
         qty = pf.get_inventory_qty(item_id, store_id)
         
@@ -266,10 +280,8 @@ def fetch_catalog_from_pf(pf, store_id):
         # Рецепты принудительно направляем в Авторские букеты
         mapped_cat = "author" 
         
-        price = pick_price(attrs) or pick_price(resolve_ref(r.get("relationships", {}).get("prices", {}).get("data", [{}])[0], idx).get("attributes") if resolve_ref(r.get("relationships", {}).get("prices", {}).get("data", [{}])[0], idx) else None)
-        
+        price = extract_safe_price(r, attrs, idx)
         item_id = str(r.get("id"))
-        # У рецептов может не быть прямого остатка, но запрашиваем на всякий случай
         qty = pf.get_inventory_qty(item_id, store_id)
         
         res.append({
@@ -315,9 +327,7 @@ def main():
         pf_items = fetch_inventory_from_pf(pf, config["TARGET_STORE_ID"])
         pf_catalog = fetch_catalog_from_pf(pf, config["TARGET_STORE_ID"])
         
-        # Объединяем штучный товар и рецепты в один общий список
         pf_all = pf_items + pf_catalog
-
         stats = {"created": 0, "updated": 0, "img_ok": 0, "img_err": 0}
 
         # 4. Обновление карточек в МоемСкладе
@@ -335,7 +345,7 @@ def main():
                     payload["productFolder"] = {"meta": target_folder}
                 
                 prices = existing.get("salePrices", [])
-                curr_price = prices[0].get("value", 0) if prices else 0
+                curr_price = prices[0].get("value", 0) if (prices and isinstance(prices, list)) else 0
                 if curr_price != b["price_kopecks"] and b["price_kopecks"] > 0:
                     payload["salePrices"] = [{"value": b["price_kopecks"], "priceType": {"meta": price_meta}}]
                 
@@ -353,7 +363,6 @@ def main():
                 if not dry_run:
                     created = ms.request("POST", "/entity/product", json_body=payload)
                     prod_id = created["id"]
-                    # Добавляем созданный товар в индекс памяти для расчета остатков
                     ms_index[b["id"]] = created
                     stats["created"] += 1
                 has_image = False
@@ -389,7 +398,6 @@ def main():
         org = {"href": f"{config['MOYSKLAD_URL']}/entity/organization/{config['ORG_ID']}", "type": "organization", "mediaType": "application/json"}
         store = {"href": f"{config['MOYSKLAD_URL']}/entity/store/{config['TARGET_STORE_ID']}", "type": "store", "mediaType": "application/json"}
 
-        # Проводим документы батчами по 100 позиций
         def post_docs(endpoint, positions, label):
             for i in range(0, len(positions), 100):
                 chunk = positions[i:i + 100]
