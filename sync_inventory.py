@@ -236,6 +236,11 @@ def match_category(name, cat_title):
             if kw in low: return cat_key
     return None
 
+def is_bouquet_or_recipe(name, cat_title):
+    text = normalize_name(f"{name} {cat_title}")
+    keywords = ["рецепт", "букет", "композиция"]
+    return any(kw in text for kw in keywords)
+
 def fetch_inventory_from_pf(pf, store_id):
     rows, included = pf.paginate("/inventory-items", {"include": "category,logo,prices", "page[size]": 100}, MAX_PAGES)
     idx = build_included_index(included)
@@ -276,17 +281,20 @@ def fetch_catalog_from_pf(pf, store_id):
         name = str(attrs.get("title") or attrs.get("name") or "").strip()
         if not name or is_blacklisted(name): continue
         
-        # Извлекаем категорию товара из каталога
         cat_title = ""
         cat_data = r.get("relationships", {}).get("category", {}).get("data")
         cat_ref = resolve_ref(cat_data, idx)
         if cat_ref: cat_title = str(cat_ref.get("attributes", {}).get("title", ""))
         if is_blacklisted(cat_title): continue
         
-        # Определяем папку назначения по имени и категории. 
-        # Если не подошло ни под одно правило, отправляем в Авторские букеты по умолчанию.
-        mapped_cat = match_category(name, cat_title) or "author"
+        mapped_cat = match_category(name, cat_title)
         
+        if mapped_cat == "author" and not is_bouquet_or_recipe(name, cat_title):
+             continue
+
+        if not mapped_cat:
+            continue
+            
         price = extract_safe_price(r, attrs, idx)
         item_id = str(r.get("id"))
         qty = pf.get_inventory_qty(item_id, store_id)
@@ -334,7 +342,6 @@ def main():
         pf_items = fetch_inventory_from_pf(pf, config["TARGET_STORE_ID"])
         pf_catalog = fetch_catalog_from_pf(pf, config["TARGET_STORE_ID"])
         
-        # Объединяем штучный товар и рецепты в один общий список
         pf_all = pf_items + pf_catalog
 
         stats = {"created": 0, "updated": 0, "img_ok": 0, "img_err": 0}
