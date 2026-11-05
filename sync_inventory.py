@@ -270,28 +270,18 @@ def fetch_inventory_from_pf(pf, store_id):
 def fetch_catalog_from_pf(pf, store_id):
     rows, included = pf.paginate("/catalog", {"include": "category,logo,prices", "page[size]": 100}, MAX_PAGES)
     idx = build_included_index(included)
-    
-    # --- НАЧАЛО ДИАГНОСТИКИ ---
-    unique_categories = set()
-    for r in rows:
-        cat_data = r.get("relationships", {}).get("category", {}).get("data")
-        cat_ref = resolve_ref(cat_data, idx)
-        if cat_ref:
-            cat_title = str(cat_ref.get("attributes", {}).get("title", ""))
-            if cat_title:
-                unique_categories.add(cat_title.strip())
-                
-    LOG.info("\n=== СПИСОК ВСЕХ КАТЕГОРИЙ В POSIFLORA (/catalog) ===")
-    for c in sorted(unique_categories):
-        LOG.info(f" -> {c}")
-    LOG.info("===================================================\n")
-    # --- КОНЕЦ ДИАГНОСТИКИ ---
-
     res = []
+    
     for r in rows:
         attrs = r.get("attributes", {})
         name = str(attrs.get("title") or attrs.get("name") or "").strip()
         if not name or is_blacklisted(name): continue
+        
+        # --- ДИАГНОСТИКА: Перехват сырого JSON рецепта ---
+        name_lower = name.lower()
+        if "сборный авторский" in name_lower or "1706" in name_lower or "с орехами" in name_lower:
+            LOG.info(f"\n=== СЫРОЙ JSON (РЕЦЕПТ В КАТАЛОГЕ): {name} ===\n{r}\n========================================================\n")
+        # ---------------------------------------------------
         
         cat_title = ""
         cat_data = r.get("relationships", {}).get("category", {}).get("data")
@@ -399,8 +389,6 @@ def main():
                     stats["img_ok"] += 1
                 except Exception as e:
                     stats["img_err"] += 1
-
-        # 4.5 ГЕНЕРАЛЬНАЯ УБОРКА: Удаляем мусор из папки Авторских букетов (Временно отключено для диагностики)
 
         # 5. Синхронизация остатков
         stock_resp = ms.request("GET", "/report/stock/bystore/current", params={"filter": f"storeId={config['TARGET_STORE_ID']}"})
