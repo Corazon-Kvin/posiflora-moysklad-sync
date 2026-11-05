@@ -250,7 +250,33 @@ def fetch_inventory_from_pf(pf, store_id):
             "id": item_id, "name": name, "price_kopecks": int(round(price * 100)),
             "image_url": logo_from_included(r, idx), "category": mapped_cat, "qty": qty
         })
-    LOG.info("Posiflora: Отобрано %s целевых штучных товаров.", len(res))
+    LOG.info("Posiflora: Отобрано %s целевых штучных товаров (/inventory-items).", len(res))
+    return res
+
+def fetch_catalog_from_pf(pf, store_id):
+    rows, included = pf.paginate("/catalog", {"include": "category,logo,prices", "page[size]": 100}, MAX_PAGES)
+    idx = build_included_index(included)
+    res = []
+    
+    for r in rows:
+        attrs = r.get("attributes", {})
+        name = str(attrs.get("title") or attrs.get("name") or "").strip()
+        if not name or is_blacklisted(name): continue
+        
+        # Рецепты принудительно направляем в Авторские букеты
+        mapped_cat = "author" 
+        
+        price = pick_price(attrs) or pick_price(resolve_ref(r.get("relationships", {}).get("prices", {}).get("data", [{}])[0], idx).get("attributes") if resolve_ref(r.get("relationships", {}).get("prices", {}).get("data", [{}])[0], idx) else None)
+        
+        item_id = str(r.get("id"))
+        # У рецептов может не быть прямого остатка, но запрашиваем на всякий случай
+        qty = pf.get_inventory_qty(item_id, store_id)
+        
+        res.append({
+            "id": item_id, "name": name, "price_kopecks": int(round(price * 100)),
+            "image_url": logo_from_included(r, idx), "category": mapped_cat, "qty": qty
+        })
+    LOG.info("Posiflora: Отобрано %s позиций из каталога рецептов (/catalog).", len(res))
     return res
 
 def main():
@@ -267,22 +293,6 @@ def main():
         ms = MoySkladClient(config["MOYSKLAD_URL"], config["MOYSKLAD_TOKEN"])
         pf = PosifloraClient(config["POSIFLORA_URL"], config["POSIFLORA_USER"], config["POSIFLORA_PASS"])
         pf.login()
-
-        # --- НАЧАЛО ОТЛАДКИ РЕЦЕПТОВ (РАДАР) ---
-        endpoints_to_try = [
-            "/catalog", "/assortment", "/templates", "/items", "/goods", 
-            "/recipe-items", "/catalog-items", "/bouquets-templates", "/variants"
-        ]
-        
-        LOG.info("\n=== ЗАПУСК РАДАРА ЭНДПОИНТОВ POSIFLORA ===")
-        for ep in endpoints_to_try:
-            try:
-                test_resp = pf.request("GET", ep, params={"page[size]": 1})
-                LOG.info(f"[УСПЕХ] Эндпоинт НАЙДЕН: {ep} -> Ответил без 404!")
-            except Exception as e:
-                pass # Игнорируем 404 ошибки для чистоты лога
-        LOG.info("=== РАДАР ЗАВЕРШЕН ===\n")
-        # --- КОНЕЦ ОТЛАДКИ ---
 
         # 1. Маппинг папок МоегоСклада
         folders = ms.list_entities("/entity/productfolder")
@@ -301,13 +311,17 @@ def main():
         ms_products = ms.list_entities("/entity/product", {"includeArchived": "false"})
         ms_index = {str(p.get("externalCode")): p for p in ms_products}
         
-        # 3. Выгружаем инвентарь из Posiflora
+        # 3. Выгружаем инвентарь и каталог из Posiflora
         pf_items = fetch_inventory_from_pf(pf, config["TARGET_STORE_ID"])
+        pf_catalog = fetch_catalog_from_pf(pf, config["TARGET_STORE_ID"])
+        
+        # Объединяем штучный товар и рецепты в один общий список
+        pf_all = pf_items + pf_catalog
 
         stats = {"created": 0, "updated": 0, "img_ok": 0, "img_err": 0}
 
         # 4. Обновление карточек в МоемСкладе
-        for b in pf_items:
+        for b in pf_all:
             target_folder = folder_meta.get(b["category"])
             if not target_folder: continue
             
@@ -352,14 +366,14 @@ def main():
                 except Exception as e:
                     stats["img_err"] += 1
 
-        # 5. Синхронизация остатков штучных товаров
+        # 5. Синхронизация остатков
         stock_resp = ms.request("GET", "/report/stock/bystore/current", params={"filter": f"storeId={config['TARGET_STORE_ID']}"})
         current_stocks = stock_resp if isinstance(stock_resp, list) else stock_resp.get("rows", [])
         stock_dict = {s.get("assortmentId") or s.get("meta", {}).get("href", "").split("/")[-1]: safe_float(s.get("stock")) for s in current_stocks}
         
         enters, losses = [], []
         
-        for pf_item in pf_items:
+        for pf_item in pf_all:
             ms_item = ms_index.get(pf_item["id"])
             if not ms_item: continue
             
