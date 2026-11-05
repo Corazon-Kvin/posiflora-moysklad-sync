@@ -31,7 +31,7 @@ IMAGE_JPEG_QUALITY = 85
 
 BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
-# Строгое сопоставление категорий
+# Строгое сопоставление категорий (для штучных товаров)
 MS_FOLDER_KEYWORDS = {
     "author": ["авторские букеты", "рецепты"], 
     "vase": ["вазы", "ваза"],
@@ -78,7 +78,7 @@ def resolve_ref(ref, included_index):
 
 def pick_price(attributes):
     if not attributes: return 0.0
-    for key in ("price", "salePrice", "retailPrice", "sellingPrice", "value", "amount", "totalAmount"):
+    for key in ("price", "salePrice", "retailPrice", "sellingPrice", "value", "amount", "totalAmount", "maxPrice", "minPrice"):
         val = attributes.get(key)
         if isinstance(val, dict):
             val = val.get("amount") or val.get("value")
@@ -279,11 +279,6 @@ def fetch_recipes_from_pf(pf, store_id):
         attrs = r.get("attributes", {})
         name = str(attrs.get("title") or attrs.get("name") or "").strip()
         if not name or is_blacklisted(name): continue
-        
-        # --- ДИАГНОСТИКА ЦЕНЫ ---
-        if "1706" in name:
-            LOG.info(f"\n=== СЫРОЙ JSON (РЕЦЕПТ /specifications): {name} ===\n{r}\n========================================================\n")
-        # ------------------------
         
         cat_title = ""
         cat_data = r.get("relationships", {}).get("category", {}).get("data")
