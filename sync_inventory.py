@@ -23,7 +23,7 @@ from PIL import Image
 REQUEST_PAUSE = 0.05
 MAX_RETRIES = 5
 HTTP_TIMEOUT = 60
-IMAGE_TIMEOUT = 5
+IMAGE_TIMEOUT = 10
 MAX_PAGES = 1000
 DOCUMENT_CHUNK_SIZE = 500
 IMAGE_MAX_SIDE = 1200
@@ -78,8 +78,12 @@ def resolve_ref(ref, included_index):
     return included_index.get((ref.get("type"), str(ref.get("id"))))
 
 def pick_price(attributes):
-    for key in ("price", "salePrice", "retailPrice", "sellingPrice", "value", "amount"):
-        val = safe_float((attributes or {}).get(key))
+    if not attributes: return 0.0
+    for key in ("price", "salePrice", "retailPrice", "sellingPrice", "value", "amount", "totalAmount"):
+        val = attributes.get(key)
+        if isinstance(val, dict):
+            val = val.get("amount") or val.get("value")
+        val = safe_float(val)
         if val > 0: return val
     return 0.0
 
@@ -173,19 +177,29 @@ class MoySkladClient(HttpClient):
         self.token = token
 
     def build_headers(self):
-        return {"Authorization": f"Bearer {self.token}", "Accept": "application/json", "Content-Type": "application/json", "Accept-Encoding": "gzip"}
+        return {
+            "Authorization": f"Bearer {self.token}", 
+            "Accept": "application/json;charset=utf-8", 
+            "Content-Type": "application/json", 
+            "Accept-Encoding": "gzip"
+        }
 
     def list_entities(self, path, extra_params=None):
-        rows, offset, limit = [], 0, 1000
+        offset, limit = 0, 100
+        out = []
         while True:
             params = {"limit": limit, "offset": offset}
             if extra_params: params.update(extra_params)
             body = self.request("GET", path, params=params)
+            
+            if isinstance(body, list):
+                return body
+                
             batch = body.get("rows", [])
-            rows.extend(batch)
+            out.extend(batch)
             if len(batch) < limit: break
             offset += limit
-        return rows
+        return out
 
 # -----------------------------------------------------------------------------
 # ЛОГИКА
@@ -225,7 +239,7 @@ def fetch_inventory_from_pf(pf, store_id):
         if is_blacklisted(cat_title): continue
         
         mapped_cat = match_category(name, cat_title)
-        if not mapped_cat: continue # Пропускаем то, что не попало в наши целевые 8 папок
+        if not mapped_cat: continue 
         
         price = pick_price(attrs) or pick_price(resolve_ref(r.get("relationships", {}).get("prices", {}).get("data", [{}])[0], idx).get("attributes") if resolve_ref(r.get("relationships", {}).get("prices", {}).get("data", [{}])[0], idx) else None)
         
@@ -240,8 +254,13 @@ def fetch_inventory_from_pf(pf, store_id):
     return res
 
 def main():
-    config = {k: os.environ.get(k, "").strip() for k in ["POSIFLORA_USER", "POSIFLORA_PASS", "POSIFLORA_URL", "MOYSKLAD_TOKEN", "MOYSKLAD_URL", "TARGET_STORE_ID", "ORG_ID"]}
-    if not all(config.values()): sys.exit("Ошибка: не заданы переменные окружения.")
+    keys = ["POSIFLORA_USER", "POSIFLORA_PASS", "POSIFLORA_URL", "MOYSKLAD_TOKEN", "MOYSKLAD_URL", "TARGET_STORE_ID", "ORG_ID"]
+    config = {k: os.environ.get(k, "").strip() for k in keys}
+    
+    missing = [k for k, v in config.items() if not v]
+    if missing: 
+        sys.exit(f"Ошибка: не заданы переменные окружения: {', '.join(missing)}")
+        
     dry_run = env_bool("DRY_RUN")
 
     try:
@@ -281,7 +300,6 @@ def main():
             if existing:
                 if existing.get("name") != b["name"]: payload["name"] = b["name"][:255]
                 
-                # Проверка категории
                 curr_folder_href = existing.get("productFolder", {}).get("meta", {}).get("href", "")
                 if target_folder["href"] != curr_folder_href:
                     payload["productFolder"] = {"meta": target_folder}
@@ -305,6 +323,8 @@ def main():
                 if not dry_run:
                     created = ms.request("POST", "/entity/product", json_body=payload)
                     prod_id = created["id"]
+                    # Добавляем созданный товар в индекс памяти для расчета остатков
+                    ms_index[b["id"]] = created
                     stats["created"] += 1
                 has_image = False
 
@@ -317,33 +337,32 @@ def main():
                     stats["img_err"] += 1
 
         # 5. Синхронизация остатков штучных товаров
-        current_stocks = ms.request("GET", "/report/stock/bystore/current", params={"filter": f"storeId={config['TARGET_STORE_ID']}"}).get("rows", [])
+        stock_resp = ms.request("GET", "/report/stock/bystore/current", params={"filter": f"storeId={config['TARGET_STORE_ID']}"})
+        current_stocks = stock_resp if isinstance(stock_resp, list) else stock_resp.get("rows", [])
         stock_dict = {s.get("assortmentId") or s.get("meta", {}).get("href", "").split("/")[-1]: safe_float(s.get("stock")) for s in current_stocks}
-        
-        # Обновляем индекс МоегоСклада, чтобы получить ID созданных товаров
-        ms_products = ms.list_entities("/entity/product", {"includeArchived": "false"})
-        ms_id_map = {str(p.get("externalCode")): p for p in ms_products}
         
         enters, losses = [], []
         
         for pf_item in pf_items:
-            ms_item = ms_id_map.get(pf_item["id"])
+            ms_item = ms_index.get(pf_item["id"])
             if not ms_item: continue
             
             target_qty = pf_item["qty"]
             curr_qty = stock_dict.get(ms_item["id"], 0.0)
             diff = round(target_qty - curr_qty, 3)
             
-            if diff > 0: enters.append({"assortment": {"meta": ms_item["meta"]}, "quantity": diff, "price": 0})
-            elif diff < 0 and curr_qty > 0: losses.append({"assortment": {"meta": ms_item["meta"]}, "quantity": min(abs(diff), curr_qty), "price": 0})
+            if diff > 0: 
+                enters.append({"assortment": {"meta": ms_item["meta"]}, "quantity": diff, "price": 0})
+            elif diff < 0 and curr_qty > 0: 
+                losses.append({"assortment": {"meta": ms_item["meta"]}, "quantity": min(abs(diff), curr_qty), "price": 0})
 
         org = {"href": f"{config['MOYSKLAD_URL']}/entity/organization/{config['ORG_ID']}", "type": "organization", "mediaType": "application/json"}
         store = {"href": f"{config['MOYSKLAD_URL']}/entity/store/{config['TARGET_STORE_ID']}", "type": "store", "mediaType": "application/json"}
 
-        # Проводим документы батчами
+        # Проводим документы батчами по 100 позиций (снижен лимит для надежности)
         def post_docs(endpoint, positions, label):
-            for i in range(0, len(positions), DOCUMENT_CHUNK_SIZE):
-                chunk = positions[i:i + DOCUMENT_CHUNK_SIZE]
+            for i in range(0, len(positions), 100):
+                chunk = positions[i:i + 100]
                 if not dry_run:
                     ms.request("POST", endpoint, json_body={"organization": {"meta": org}, "store": {"meta": store}, "applicable": True, "positions": chunk})
                 LOG.info(f"{label}: проведено {len(chunk)} позиций")
