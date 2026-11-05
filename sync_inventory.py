@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # Скрипт 2: ИНВЕНТАРЬ И ОСТАТКИ (sync_inventory.py)
-# Задача: Синхронизация каталога штучных товаров, распределение по строгим категориям, выравнивание остатков, строгая изоляция рецептов.
+# Задача: Синхронизация штучных товаров и РЕЦЕПТОВ (/specifications) по строгим категориям, очистка мусора.
 # Запуск: Каждые 2-3 часа.
 
 import base64
@@ -28,11 +28,10 @@ MAX_PAGES = 1000
 DOCUMENT_CHUNK_SIZE = 500
 IMAGE_MAX_SIDE = 1200
 IMAGE_JPEG_QUALITY = 85
-PRODUCT_NAME_LIMIT = 255
 
 BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
-# Строгое сопоставление категорий (по ТЗ)
+# Строгое сопоставление категорий (для штучных товаров)
 MS_FOLDER_KEYWORDS = {
     "author": ["авторские букеты", "рецепты"], 
     "vase": ["вазы", "ваза"],
@@ -44,7 +43,6 @@ MS_FOLDER_KEYWORDS = {
     "balloon": ["шары", "шар", "сфера", "баблс", "фольга", "бабл"]
 }
 
-# Игнорируем сырье и кофейный мусор
 BLACKLIST = ["сырье", "эклер", "тарталет", "кофе", "сырник", "чиабатта", "багет", "булочк", "круассан", "сосиска", "кремибон", "макарон", "десерт", "напиток"]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
@@ -267,8 +265,14 @@ def fetch_inventory_from_pf(pf, store_id):
     LOG.info(f"Posiflora: Отобрано {len(res)} целевых штучных товаров (/inventory-items).")
     return res
 
-def fetch_catalog_from_pf(pf, store_id):
-    rows, included = pf.paginate("/catalog", {"include": "category,logo,prices", "page[size]": 100}, MAX_PAGES)
+def fetch_recipes_from_pf(pf, store_id):
+    # Прямой запрос к эндпоинту спецификаций (рецептов)
+    try:
+        rows, included = pf.paginate("/specifications", {"include": "logo,prices", "page[size]": 100}, MAX_PAGES)
+    except Exception as e:
+        LOG.error(f"Posiflora: Ошибка при запросе рецептов (/specifications): {e}")
+        return []
+        
     idx = build_included_index(included)
     res = []
     
@@ -277,33 +281,16 @@ def fetch_catalog_from_pf(pf, store_id):
         name = str(attrs.get("title") or attrs.get("name") or "").strip()
         if not name or is_blacklisted(name): continue
         
-        # --- ДИАГНОСТИКА: Перехват сырого JSON рецепта ---
-        name_lower = name.lower()
-        if "сборный авторский" in name_lower or "1706" in name_lower or "с орехами" in name_lower:
-            LOG.info(f"\n=== СЫРОЙ JSON (РЕЦЕПТ В КАТАЛОГЕ): {name} ===\n{r}\n========================================================\n")
-        # ---------------------------------------------------
-        
-        cat_title = ""
-        cat_data = r.get("relationships", {}).get("category", {}).get("data")
-        cat_ref = resolve_ref(cat_data, idx)
-        if cat_ref: cat_title = str(cat_ref.get("attributes", {}).get("title", ""))
-        
-        text_to_check = normalize_name(f"{name} {cat_title}")
-        is_author = any(kw in text_to_check for kw in ["букет", "композици", "рецепт", "авторск"])
-        is_junk = any(kw in text_to_check for kw in ["шар", "цифра", "свеча", "открытка", "пакет", "коробка", "лента", "доставка", "оформление", "сертификат", "гирлянда", "салфетк", "конверт", "стакан", "диффузор"])
-        
-        if not is_author or is_junk:
-            continue
-            
         price = extract_safe_price(r, attrs, idx)
         item_id = str(r.get("id"))
         qty = pf.get_inventory_qty(item_id, store_id)
         
+        # Все рецепты без дополнительных проверок идут в категорию author
         res.append({
             "id": item_id, "name": name, "price_kopecks": int(round(price * 100)),
             "image_url": logo_from_included(r, idx), "category": "author", "qty": qty
         })
-    LOG.info(f"Posiflora: Отобрано {len(res)} чистых букетов/композиций из каталога (/catalog).")
+    LOG.info(f"Posiflora: Отобрано {len(res)} авторских букетов из раздела рецептов (/specifications).")
     return res
 
 def main():
@@ -340,9 +327,9 @@ def main():
         
         # 3. Выгружаем данные
         pf_items = fetch_inventory_from_pf(pf, config["TARGET_STORE_ID"])
-        pf_catalog = fetch_catalog_from_pf(pf, config["TARGET_STORE_ID"])
+        pf_recipes = fetch_recipes_from_pf(pf, config["TARGET_STORE_ID"])
         
-        pf_all = pf_items + pf_catalog
+        pf_all = pf_items + pf_recipes
         stats = {"created": 0, "updated": 0, "archived_junk": 0, "img_ok": 0, "img_err": 0}
 
         # 4. Обновление карточек в МоемСкладе
@@ -389,6 +376,17 @@ def main():
                     stats["img_ok"] += 1
                 except Exception as e:
                     stats["img_err"] += 1
+
+        # 4.5 ГЕНЕРАЛЬНАЯ УБОРКА: Удаляем старый мусор из папки Авторских букетов
+        author_meta = folder_meta.get("author")
+        if author_meta:
+            valid_author_ids = {b["id"] for b in pf_recipes}
+            for code, p in ms_index.items():
+                if p.get("productFolder", {}).get("meta", {}).get("href") == author_meta["href"]:
+                    if code not in valid_author_ids and not p.get("archived"):
+                        if not dry_run:
+                            ms.request("PUT", f"/entity/product/{p['id']}", json_body={"archived": True})
+                            stats["archived_junk"] += 1
 
         # 5. Синхронизация остатков
         stock_resp = ms.request("GET", "/report/stock/bystore/current", params={"filter": f"storeId={config['TARGET_STORE_ID']}"})
