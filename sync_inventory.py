@@ -268,6 +268,14 @@ def main():
         pf = PosifloraClient(config["POSIFLORA_URL"], config["POSIFLORA_USER"], config["POSIFLORA_PASS"])
         pf.login()
 
+        # --- НАЧАЛО ОТЛАДКИ РЕЦЕПТОВ ---
+        try:
+            test_recipes = pf.request("GET", "/recipes", params={"page[size]": 2, "include": "logo,prices"})
+            LOG.info(f"\n=== СЫРОЙ JSON: РЕЦЕПТЫ ===\n{test_recipes}\n========================")
+        except Exception as e:
+            LOG.info(f"\n=== ОШИБКА ЗАПРОСА РЕЦЕПТОВ: {e} ===\n")
+        # --- КОНЕЦ ОТЛАДКИ ---
+
         # 1. Маппинг папок МоегоСклада
         folders = ms.list_entities("/entity/productfolder")
         folder_meta = {}
@@ -359,7 +367,7 @@ def main():
         org = {"href": f"{config['MOYSKLAD_URL']}/entity/organization/{config['ORG_ID']}", "type": "organization", "mediaType": "application/json"}
         store = {"href": f"{config['MOYSKLAD_URL']}/entity/store/{config['TARGET_STORE_ID']}", "type": "store", "mediaType": "application/json"}
 
-        # Проводим документы батчами по 100 позиций (снижен лимит для надежности)
+        # Проводим документы батчами по 100 позиций
         def post_docs(endpoint, positions, label):
             for i in range(0, len(positions), 100):
                 chunk = positions[i:i + 100]
