@@ -198,6 +198,14 @@ def fetch_showcase_bouquets(posiflora):
         attrs = r.get("attributes", {})
         status = str(attrs.get("status") or attrs.get("state") or "").strip().lower()
         
+        # --- НАЧАЛО ОТЛАДКИ ---
+        debug_name = str(attrs.get("title") or attrs.get("name") or "")
+        if "0412" in debug_name:
+            LOG.info(f"\n=== СЫРОЙ JSON: АКТУАЛЬНЫЙ БУКЕТ 0412 ===\n{r}\n========================")
+        if "2505" in debug_name:
+            LOG.info(f"\n=== СЫРОЙ JSON: ЛИШНИЙ БУКЕТ 2505 ===\n{r}\n========================")
+        # --- КОНЕЦ ОТЛАДКИ ---
+        
         # 1. Отсекаем только явно мертвые статусы
         if status in ("sold", "disassembled", "written_off", "deleted", "archived", "draft"):
             skipped_status += 1
@@ -210,7 +218,7 @@ def fetch_showcase_bouquets(posiflora):
             skipped_status += 1
             continue 
         
-        name = str(attrs.get("title") or attrs.get("name") or "Без названия").strip()
+        name = debug_name.strip()
         if re.match(r"^\d{3,4}$", name): name = f"Букет {name}"
         
         price = pick_price(attrs)
