@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # Скрипт 1: ВИТРИНА (sync_showcase.py)
-# Задача: Быстрая синхронизация товаров для онлайн-витрины (Tilda).
+# Задача: Быстрая синхронизация товаров для онлайн-витрины (Tilda) + ДИАГНОСТИКА ФОТО.
 # Запуск: Каждые 30 минут.
 
 import base64
@@ -37,6 +37,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 LOG = logging.getLogger("sync_showcase")
 
 class ApiError(Exception): pass
+
+DEBUG_PRINTED = False
 
 # -----------------------------------------------------------------------------
 # УТИЛИТЫ И API КЛИЕНТЫ
@@ -220,6 +222,7 @@ def download_image(url, base_url):
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 def fetch_showcase_items(pf, store_id):
+    global DEBUG_PRINTED
     res = []
     
     rows_inv, inc_inv = pf.paginate("/inventory-items", {"include": "category,logo,images,prices", "page[size]": 100}, MAX_PAGES)
@@ -235,7 +238,18 @@ def fetch_showcase_items(pf, store_id):
         qty = pf.get_inventory_qty(item_id, store_id)
         
         img_url = logo_from_included(r, idx_inv)
-        if not img_url: LOG.warning(f"Posiflora: Не найдено фото для {name}")
+        if not img_url: 
+            LOG.warning(f"Posiflora: Не найдено фото для {name}")
+            if not DEBUG_PRINTED:
+                LOG.info(f"\n=== ДИАГНОСТИКА ФОТО ДЛЯ: {name} ===")
+                LOG.info(f"Связи (relationships.images/logo): {r.get('relationships', {}).get('images')} | {r.get('relationships', {}).get('logo')}")
+                images_in_idx = [v for k, v in idx_inv.items() if 'image' in str(k[0]).lower() or 'logo' in str(k[0]).lower()]
+                if images_in_idx:
+                    LOG.info(f"СЫРОЙ JSON ФОТО (ИЗ INCLUDED):\n{images_in_idx[0]}")
+                else:
+                    LOG.info("В INCLUDED ВООБЩЕ НЕТ КАРТИНОК! Сервер не прислал.")
+                LOG.info("=======================================\n")
+                DEBUG_PRINTED = True
         
         res.append({"id": item_id, "name": name, "price_kopecks": int(round(price * 100)), "image_url": img_url, "qty": qty})
         
@@ -253,7 +267,18 @@ def fetch_showcase_items(pf, store_id):
             qty = pf.get_inventory_qty(item_id, store_id)
             
             img_url = logo_from_included(r, idx_rec)
-            if not img_url: LOG.warning(f"Posiflora: Не найдено фото для {name}")
+            if not img_url: 
+                LOG.warning(f"Posiflora: Не найдено фото для {name}")
+                if not DEBUG_PRINTED:
+                    LOG.info(f"\n=== ДИАГНОСТИКА ФОТО ДЛЯ: {name} ===")
+                    LOG.info(f"Связи (relationships.images/logo): {r.get('relationships', {}).get('images')} | {r.get('relationships', {}).get('logo')}")
+                    images_in_idx = [v for k, v in idx_rec.items() if 'image' in str(k[0]).lower() or 'logo' in str(k[0]).lower()]
+                    if images_in_idx:
+                        LOG.info(f"СЫРОЙ JSON ФОТО (ИЗ INCLUDED):\n{images_in_idx[0]}")
+                    else:
+                        LOG.info("В INCLUDED ВООБЩЕ НЕТ КАРТИНОК! Сервер не прислал.")
+                    LOG.info("=======================================\n")
+                    DEBUG_PRINTED = True
             
             res.append({"id": item_id, "name": name, "price_kopecks": int(round(price * 100)), "image_url": img_url, "qty": qty})
     except Exception as e:
