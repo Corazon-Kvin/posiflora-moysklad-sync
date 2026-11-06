@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # Скрипт 2: ИНВЕНТАРЬ И ОСТАТКИ (sync_inventory.py)
-# Задача: Синхронизация штучных товаров и РЕЦЕПТОВ (/specifications) по строгим категориям, очистка мусора.
+# Задача: Синхронизация штучных товаров и рецептов. Согласован с витриной.
 # Запуск: Каждые 2-3 часа.
 
 import base64
@@ -25,21 +25,21 @@ MAX_RETRIES = 5
 HTTP_TIMEOUT = 60
 IMAGE_TIMEOUT = 10
 MAX_PAGES = 1000
-DOCUMENT_CHUNK_SIZE = 500
 IMAGE_MAX_SIDE = 1200
 IMAGE_JPEG_QUALITY = 85
 
 BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
-# Строгое сопоставление категорий (для штучных товаров)
+# Сюда добавлена папка витрины, чтобы скрипт знал ее координаты
 MS_FOLDER_KEYWORDS = {
+    "showcase": ["витрина tilda"],
     "author": ["авторские букеты", "рецепты"], 
     "vase": ["вазы", "ваза"],
     "toy": ["игрушки", "игрушк", "медведь", "заяц"],
     "packaging": ["подарочные коробки", "упаковк", "лента", "коробка", "пакет", "крафт", "открытка", "конверт", "бумага", "сумка"],
     "candlestick": ["подсвечники", "подсвечник"],
-    "candle": ["свечи", "свеч", "цифра"],
-    "flower": ["цветы", "срезка", "зелень", "роза", "хризантема", "питоспорум", "гвоздика", "антирринум", "диантус", "эвкалипт", "гипсофила"],
+    "candle": ["свечи", "свеч", "цифра", "фонтан"],
+    "flower": ["цветы", "срезка", "зелень", "роза", "хризантема", "питоспорум", "гвоздика", "антирринум", "диантус", "эвкалипт", "гипсофила", "рускус", "амариллис"],
     "balloon": ["шары", "шар", "сфера", "баблс", "фольга", "бабл"]
 }
 
@@ -78,7 +78,7 @@ def resolve_ref(ref, included_index):
 
 def pick_price(attributes):
     if not attributes: return 0.0
-    for key in ("price", "salePrice", "retailPrice", "sellingPrice", "value", "amount", "totalAmount", "maxPrice", "minPrice"):
+    for key in ("price", "salePrice", "retailPrice", "sellingPrice", "value", "amount", "totalAmount", "maxPrice", "minPrice", "basePrice", "regularPrice"):
         val = attributes.get(key)
         if isinstance(val, dict):
             val = val.get("amount") or val.get("value")
@@ -99,15 +99,24 @@ def extract_safe_price(row, attrs, idx):
     return 0.0
 
 def logo_from_included(row, included_index):
-    for rel_name in ("logo", "images", "image"):
+    for rel_name in ("images", "logo", "image", "picture", "photo", "files", "file"):
         refs = row.get("relationships", {}).get(rel_name, {}).get("data")
+        if not refs: continue
         refs = [refs] if isinstance(refs, dict) else (refs if isinstance(refs, list) else [])
         for ref in refs:
             inc = resolve_ref(ref, included_index)
             if inc:
                 attrs = inc.get("attributes") or {}
-                for k in ("url", "originalUrl", "fullUrl", "link"):
-                    if attrs.get(k): return str(attrs[k]).strip()
+                # ДОБАВЛЕНЫ НОВЫЕ КЛЮЧИ ИЗ ДИАГНОСТИКИ
+                for k in ("file", "fileMedium", "fileShop", "url", "originalUrl", "fullUrl", "link", "src", "path", "fileUrl", "fileSmall"):
+                    val = attrs.get(k)
+                    if val: return str(val).strip()
+                    
+    attrs = row.get("attributes", {})
+    for k, v in attrs.items():
+        if isinstance(v, str) and (v.startswith("http") or v.startswith("//")) and any(ext in v.lower() for ext in [".jpg", ".jpeg", ".png", ".webp"]):
+            return v.strip()
+            
     return ""
 
 def env_bool(name):
@@ -202,10 +211,7 @@ class MoySkladClient(HttpClient):
             params = {"limit": limit, "offset": offset}
             if extra_params: params.update(extra_params)
             body = self.request("GET", path, params=params)
-            
-            if isinstance(body, list):
-                return body
-                
+            if isinstance(body, list): return body
             batch = body.get("rows", [])
             out.extend(batch)
             if len(batch) < limit: break
@@ -226,17 +232,20 @@ def download_image(url, base_url):
     img.save(buf, format="JPEG", quality=IMAGE_JPEG_QUALITY, optimize=True)
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
-def match_category(name, cat_title):
+def match_category(name, cat_title, is_public=False):
+    # ПРАВИЛО 1: Если товар выведен на сайт, его дом - только Витрина Tilda
+    if is_public: return "showcase"
+    
+    # ПРАВИЛО 2: Стандартное распределение
     text_to_check = f"{name} {cat_title}"
     low = normalize_name(text_to_check)
     for cat_key, keywords in MS_FOLDER_KEYWORDS.items():
-        if cat_key == "author": continue 
+        if cat_key == "showcase": continue 
         for kw in keywords:
             if kw in low: return cat_key
     return None
 
 def fetch_inventory_from_pf(pf, store_id):
-    # ДОБАВЛЕНО 'images' В INCLUDE
     rows, included = pf.paginate("/inventory-items", {"include": "category,logo,images,prices", "page[size]": 100}, MAX_PAGES)
     idx = build_included_index(included)
     res = []
@@ -252,23 +261,26 @@ def fetch_inventory_from_pf(pf, store_id):
         if cat_ref: cat_title = str(cat_ref.get("attributes", {}).get("title", ""))
         if is_blacklisted(cat_title): continue
         
-        mapped_cat = match_category(name, cat_title)
+        is_public = attrs.get("public") is True
+        mapped_cat = match_category(name, cat_title, is_public)
         if not mapped_cat: continue 
         
         price = extract_safe_price(r, attrs, idx)
         item_id = str(r.get("id"))
         qty = pf.get_inventory_qty(item_id, store_id)
         
+        img_url = logo_from_included(r, idx)
+        if not img_url: LOG.warning(f"Posiflora: Не найдено фото для {name}")
+        
         res.append({
             "id": item_id, "name": name, "price_kopecks": int(round(price * 100)),
-            "image_url": logo_from_included(r, idx), "category": mapped_cat, "qty": qty
+            "image_url": img_url, "category": mapped_cat, "qty": qty
         })
-    LOG.info(f"Posiflora: Отобрано {len(res)} целевых штучных товаров (/inventory-items).")
+    LOG.info(f"Posiflora: Отобрано {len(res)} целевых штучных товаров.")
     return res
 
 def fetch_recipes_from_pf(pf, store_id):
     try:
-        # ДОБАВЛЕНО 'images' В INCLUDE
         rows, included = pf.paginate("/specifications", {"include": "category,logo,images,prices", "page[size]": 100}, MAX_PAGES)
     except Exception as e:
         LOG.error(f"Posiflora: Ошибка при запросе рецептов (/specifications): {e}")
@@ -287,15 +299,19 @@ def fetch_recipes_from_pf(pf, store_id):
         cat_ref = resolve_ref(cat_data, idx)
         if cat_ref: cat_title = str(cat_ref.get("attributes", {}).get("title", ""))
         
-        mapped_cat = match_category(name, cat_title) or "author"
+        is_public = attrs.get("public") is True
+        mapped_cat = match_category(name, cat_title, is_public) or ("showcase" if is_public else "author")
         
         price = extract_safe_price(r, attrs, idx)
         item_id = str(r.get("id"))
         qty = pf.get_inventory_qty(item_id, store_id)
         
+        img_url = logo_from_included(r, idx)
+        if not img_url: LOG.warning(f"Posiflora: Не найдено фото для {name}")
+        
         res.append({
             "id": item_id, "name": name, "price_kopecks": int(round(price * 100)),
-            "image_url": logo_from_included(r, idx), "category": mapped_cat, "qty": qty
+            "image_url": img_url, "category": mapped_cat, "qty": qty
         })
     LOG.info(f"Posiflora: Отобрано {len(res)} позиций из раздела рецептов (/specifications).")
     return res
@@ -305,8 +321,7 @@ def main():
     config = {k: os.environ.get(k, "").strip() for k in keys}
     
     missing = [k for k, v in config.items() if not v]
-    if missing: 
-        sys.exit(f"Ошибка: не заданы переменные окружения: {', '.join(missing)}")
+    if missing: sys.exit(f"Ошибка: не заданы переменные: {', '.join(missing)}")
         
     dry_run = env_bool("DRY_RUN")
 
@@ -315,7 +330,6 @@ def main():
         pf = PosifloraClient(config["POSIFLORA_URL"], config["POSIFLORA_USER"], config["POSIFLORA_PASS"])
         pf.login()
 
-        # 1. Маппинг папок МоегоСклада
         folders = ms.list_entities("/entity/productfolder")
         folder_meta = {}
         for f in folders:
@@ -328,18 +342,14 @@ def main():
         price_types = ms.list_entities("/context/companysettings/pricetype")
         price_meta = next((pt["meta"] for pt in price_types if pt.get("name", "").lower() == "цена продажи"), price_types[0]["meta"])
 
-        # 2. Выгружаем все товары МоегоСклада
         ms_products = ms.list_entities("/entity/product", {"includeArchived": "false"})
         ms_index = {str(p.get("externalCode")): p for p in ms_products}
         
-        # 3. Выгружаем данные
         pf_items = fetch_inventory_from_pf(pf, config["TARGET_STORE_ID"])
         pf_recipes = fetch_recipes_from_pf(pf, config["TARGET_STORE_ID"])
-        
         pf_all = pf_items + pf_recipes
-        stats = {"created": 0, "updated": 0, "archived_junk": 0, "img_ok": 0, "img_err": 0}
+        stats = {"created": 0, "updated": 0, "img_ok": 0, "img_err": 0}
 
-        # 4. Обновление карточек в МоемСкладе
         for b in pf_all:
             target_folder = folder_meta.get(b["category"])
             if not target_folder: continue
@@ -362,7 +372,8 @@ def main():
                     ms.request("PUT", f"/entity/product/{existing['id']}", json_body=payload)
                     stats["updated"] += 1
                 prod_id = existing["id"]
-                has_image = bool(existing.get("images", {}).get("meta", {}).get("size", 0) or "image" in existing)
+                
+                has_image = existing.get("images", {}).get("meta", {}).get("size", 0) > 0
             else:
                 payload = {
                     "name": b["name"][:255], "externalCode": b["id"],
@@ -380,22 +391,12 @@ def main():
                 try:
                     img_data = download_image(b["image_url"], config["POSIFLORA_URL"])
                     ms.request("POST", f"/entity/product/{prod_id}/images", json_body={"filename": f"{b['id']}.jpg", "content": img_data})
+                    LOG.info(f"Загружено фото для: {b['name']}")
                     stats["img_ok"] += 1
                 except Exception as e:
+                    LOG.error(f"Ошибка загрузки фото для {b['name']}: {e}")
                     stats["img_err"] += 1
 
-        # 4.5 ГЕНЕРАЛЬНАЯ УБОРКА: Удаляем старый мусор из папки Авторских букетов
-        author_meta = folder_meta.get("author")
-        if author_meta:
-            valid_author_ids = {b["id"] for b in pf_recipes if b["category"] == "author"}
-            for code, p in ms_index.items():
-                if p.get("productFolder", {}).get("meta", {}).get("href") == author_meta["href"]:
-                    if code not in valid_author_ids and not p.get("archived"):
-                        if not dry_run:
-                            ms.request("PUT", f"/entity/product/{p['id']}", json_body={"archived": True})
-                            stats["archived_junk"] += 1
-
-        # 5. Синхронизация остатков
         stock_resp = ms.request("GET", "/report/stock/bystore/current", params={"filter": f"storeId={config['TARGET_STORE_ID']}"})
         current_stocks = stock_resp if isinstance(stock_resp, list) else stock_resp.get("rows", [])
         stock_dict = {s.get("assortmentId") or s.get("meta", {}).get("href", "").split("/")[-1]: safe_float(s.get("stock")) for s in current_stocks}
