@@ -236,7 +236,8 @@ def match_category(name, cat_title):
     return None
 
 def fetch_inventory_from_pf(pf, store_id):
-    rows, included = pf.paginate("/inventory-items", {"include": "category,logo,prices", "page[size]": 100}, MAX_PAGES)
+    # ДОБАВЛЕНО 'images' В INCLUDE
+    rows, included = pf.paginate("/inventory-items", {"include": "category,logo,images,prices", "page[size]": 100}, MAX_PAGES)
     idx = build_included_index(included)
     res = []
     
@@ -267,7 +268,8 @@ def fetch_inventory_from_pf(pf, store_id):
 
 def fetch_recipes_from_pf(pf, store_id):
     try:
-        rows, included = pf.paginate("/specifications", {"include": "category,logo,prices", "page[size]": 100}, MAX_PAGES)
+        # ДОБАВЛЕНО 'images' В INCLUDE
+        rows, included = pf.paginate("/specifications", {"include": "category,logo,images,prices", "page[size]": 100}, MAX_PAGES)
     except Exception as e:
         LOG.error(f"Posiflora: Ошибка при запросе рецептов (/specifications): {e}")
         return []
@@ -285,7 +287,6 @@ def fetch_recipes_from_pf(pf, store_id):
         cat_ref = resolve_ref(cat_data, idx)
         if cat_ref: cat_title = str(cat_ref.get("attributes", {}).get("title", ""))
         
-        # Умное распределение: если в рецептах есть коробка, она уйдет в упаковку, иначе останется в букетах
         mapped_cat = match_category(name, cat_title) or "author"
         
         price = extract_safe_price(r, attrs, idx)
