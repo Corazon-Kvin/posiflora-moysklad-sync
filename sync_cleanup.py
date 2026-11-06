@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# Скрипт 3: ГЕНЕРАЛЬНАЯ УБОРКА (sync_cleanup.py)
-# Задача: Ночная архивация товаров в МоемСкладе, которые были удалены в Posiflora.
-# Запуск: Раз в сутки ночью (0 3 * * *).
+# Скрипт 3: НОЧНАЯ ОЧИСТКА (sync_cleanup.py)
+# Задача: Удалять (архивировать) в МоемСкладе товары, которые были удалены в Posiflora.
+# СТРОГОЕ ОГРАНИЧЕНИЕ: Скрипт проверяет и удаляет товары ТОЛЬКО внутри папки "Цветы лакма". Кофейный ассортимент игнорируется.
+# Запуск: Раз в сутки ночью.
 
 import logging
 import os
 import sys
 import time
+
 import requests
 
 # -----------------------------------------------------------------------------
-# КОНСТАНТЫ
+# КОНСТАНТЫ И НАСТРОЙКИ
 # -----------------------------------------------------------------------------
 REQUEST_PAUSE = 0.05
 MAX_RETRIES = 5
 HTTP_TIMEOUT = 60
 MAX_PAGES = 1000
+
+# Корневая папка, внутри которой разрешено удаление. Все, что вне ее - НЕ ТРОГАЕМ.
+ROOT_FLOWER_FOLDER = "Цветы лакма"
 
 BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
@@ -26,9 +31,9 @@ LOG = logging.getLogger("sync_cleanup")
 
 class ApiError(Exception): pass
 
-def env_bool(name):
-    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "y")
-
+# -----------------------------------------------------------------------------
+# API КЛИЕНТЫ
+# -----------------------------------------------------------------------------
 class HttpClient:
     def __init__(self, base_url, label):
         self.base_url = base_url.rstrip("/")
@@ -76,8 +81,7 @@ class PosifloraClient(HttpClient):
         if not self.token: raise ApiError("Posiflora: accessToken не найден")
 
     def paginate(self, path, params, max_pages):
-        rows = []
-        page = 1
+        rows, page = [], 1
         while page <= max_pages:
             p = dict(params); p["page[number]"] = page
             body = self.request("GET", path, params=p)
@@ -119,60 +123,113 @@ class MoySkladClient(HttpClient):
             offset += limit
         return out
 
+# -----------------------------------------------------------------------------
+# ЛОГИКА
+# -----------------------------------------------------------------------------
+def get_all_posiflora_ids(pf):
+    """Собирает ВСЕ активные ID из Posiflora (инвентарь + рецепты)."""
+    active_ids = set()
+    
+    # 1. Забираем штучный инвентарь
+    inv_rows = pf.paginate("/inventory-items", {"page[size]": 100}, MAX_PAGES)
+    for r in inv_rows:
+        active_ids.add(str(r.get("id")))
+        
+    # 2. Забираем рецепты (Авторские букеты)
+    try:
+        rec_rows = pf.paginate("/specifications", {"page[size]": 100}, MAX_PAGES)
+        for r in rec_rows:
+            active_ids.add(str(r.get("id")))
+    except Exception as e:
+        LOG.error(f"Posiflora: Ошибка при запросе рецептов: {e}")
+        
+    LOG.info(f"Posiflora: Всего найдено {len(active_ids)} активных позиций (инвентарь + рецепты).")
+    return active_ids
+
+def get_flower_folder_paths(ms):
+    """
+    Возвращает список href всех папок, которые вложены в "Цветы лакма", 
+    включая саму корневую папку "Цветы лакма".
+    """
+    folders = ms.list_entities("/entity/productfolder")
+    
+    # Находим корневую папку "Цветы лакма"
+    root_folder = None
+    for f in folders:
+        if f.get("name") == ROOT_FLOWER_FOLDER:
+            root_folder = f
+            break
+            
+    if not root_folder:
+        LOG.error(f"Не найдена корневая папка '{ROOT_FLOWER_FOLDER}' в МоемСкладе!")
+        return set()
+        
+    root_path = root_folder.get("pathName", "")
+    full_root_path = f"{root_path}/{ROOT_FLOWER_FOLDER}" if root_path else ROOT_FLOWER_FOLDER
+    
+    # Собираем href всех папок, чей путь начинается с "Цветы лакма"
+    allowed_folder_hrefs = {root_folder.get("meta", {}).get("href")}
+    
+    for f in folders:
+        path = f.get("pathName", "")
+        if path.startswith(full_root_path) or path == ROOT_FLOWER_FOLDER:
+            allowed_folder_hrefs.add(f.get("meta", {}).get("href"))
+            
+    return allowed_folder_hrefs
+
 def main():
     keys = ["POSIFLORA_USER", "POSIFLORA_PASS", "POSIFLORA_URL", "MOYSKLAD_TOKEN", "MOYSKLAD_URL"]
     config = {k: os.environ.get(k, "").strip() for k in keys}
     
     missing = [k for k, v in config.items() if not v]
     if missing: 
-        sys.exit(f"Ошибка: не заданы переменные окружения: {', '.join(missing)}")
+        sys.exit(f"Ошибка: не заданы переменные: {', '.join(missing)}")
         
-    dry_run = env_bool("DRY_RUN")
+    dry_run = os.environ.get("DRY_RUN", "").strip().lower() in ("1", "true", "yes", "y")
 
     try:
         ms = MoySkladClient(config["MOYSKLAD_URL"], config["MOYSKLAD_TOKEN"])
         pf = PosifloraClient(config["POSIFLORA_URL"], config["POSIFLORA_USER"], config["POSIFLORA_PASS"])
         pf.login()
 
-        # 1. Загружаем все товары МоегоСклада
-        LOG.info("Загрузка активных товаров из МоегоСклада...")
+        # 1. Получаем все актуальные ID из Posiflora (чтобы знать, что НЕ удалять)
+        pf_active_ids = get_all_posiflora_ids(pf)
+
+        # 2. Определяем границы дозволенного в МоемСкладе
+        allowed_folder_hrefs = get_flower_folder_paths(ms)
+        if not allowed_folder_hrefs:
+            sys.exit("Очистка отменена: не удалось определить целевые папки цветов.")
+
+        # 3. Получаем все неархивированные товары из МоегоСклада
         ms_products = ms.list_entities("/entity/product", {"includeArchived": "false"})
         
-        # Оставляем только те, у которых есть externalCode (чтобы не трогать ручные товары)
-        ms_active = {str(p["externalCode"]): p["id"] for p in ms_products if p.get("externalCode")}
-        LOG.info(f"Найдено {len(ms_active)} синхронизированных товаров в МоемСкладе.")
-
-        # 2. Загружаем все ID из Posiflora
-        LOG.info("Загрузка букетов из Posiflora...")
-        pf_bouquets = pf.paginate("/bouquets", {"page[size]": 100}, MAX_PAGES)
-        
-        LOG.info("Загрузка инвентаря из Posiflora...")
-        pf_inventory = pf.paginate("/inventory-items", {"page[size]": 100}, MAX_PAGES)
-
-        pf_active_ids = {str(item.get("id")) for item in pf_bouquets + pf_inventory if item.get("id")}
-        LOG.info(f"Posiflora: всего найдено {len(pf_active_ids)} сущностей.")
-
-        # 3. Ищем удаленные товары
-        orphans = []
-        for ext_code, ms_id in ms_active.items():
-            if ext_code not in pf_active_ids:
-                orphans.append(ms_id)
-
-        LOG.info(f"Найдено {len(orphans)} удаленных товаров, требующих архивации.")
-
-        # 4. Архивируем
         archived_count = 0
-        for ms_id in orphans:
-            if not dry_run:
-                ms.request("PUT", f"/entity/product/{ms_id}", json_body={"archived": True})
-            archived_count += 1
-            if archived_count % 50 == 0:
-                LOG.info(f"Архивировано {archived_count} из {len(orphans)}...")
+        skipped_coffee_count = 0
+        
+        # 4. Сканируем и архивируем
+        for p in ms_products:
+            ms_id = p.get("id")
+            ext_code = str(p.get("externalCode", ""))
+            
+            # Проверяем, в какой папке лежит товар
+            folder_href = p.get("productFolder", {}).get("meta", {}).get("href")
+            
+            # Если товар лежит ВНЕ папки "Цветы лакма" (например, в "Сырьё" или "Товары") - строго игнорируем!
+            if folder_href not in allowed_folder_hrefs:
+                skipped_coffee_count += 1
+                continue
+                
+            # Если товар лежит в "Цветах", но его больше нет в Posiflora - архивируем
+            if ext_code and ext_code not in pf_active_ids:
+                if not dry_run:
+                    ms.request("PUT", f"/entity/product/{ms_id}", json_body={"archived": True})
+                archived_count += 1
+                LOG.info(f"В архив отправлен: {p.get('name')} (отсутствует в Posiflora)")
 
-        LOG.info(f"Уборка успешно завершена. Отправлено в архив: {archived_count}")
+        LOG.info(f"Очистка завершена. Отправлено в архив: {archived_count} шт. Проигнорировано товаров вне цветочных папок (кофейня и др.): {skipped_coffee_count} шт.")
 
     except Exception as e:
-        LOG.error(f"Критическая ошибка: {e}")
+        LOG.error(f"Критическая ошибка очистки: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":
