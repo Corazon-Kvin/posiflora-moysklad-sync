@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# Скрипт 1: ВИТРИНА (sync_showcase.py)
-# Задача: Синхронизация товаров для онлайн-витрины (Tilda) с загрузкой фотографий.
-# Запуск: Каждые 30 минут.
+# Скрипт 2: ИНВЕНТАРЬ И ОСТАТКИ (sync_inventory.py)
+# Задача: Синхронизация штучных товаров и рецептов. Согласован с витриной.
+# Запуск: Каждые 2-3 часа.
 
 import base64
 import io
@@ -25,17 +25,28 @@ MAX_RETRIES = 5
 HTTP_TIMEOUT = 60
 IMAGE_TIMEOUT = 10
 MAX_PAGES = 1000
-DOCUMENT_CHUNK_SIZE = 500
 IMAGE_MAX_SIDE = 1200
 IMAGE_JPEG_QUALITY = 85
 
-TARGET_FOLDER_NAME = "Витрина Tilda"
-
 BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
+# Сюда добавлена папка витрины, чтобы скрипт знал ее координаты
+MS_FOLDER_KEYWORDS = {
+    "showcase": ["витрина tilda"],
+    "author": ["авторские букеты", "рецепты"], 
+    "vase": ["вазы", "ваза"],
+    "toy": ["игрушки", "игрушк", "медведь", "заяц"],
+    "packaging": ["подарочные коробки", "упаковк", "лента", "коробка", "пакет", "крафт", "открытка", "конверт", "бумага", "сумка"],
+    "candlestick": ["подсвечники", "подсвечник"],
+    "candle": ["свечи", "свеч", "цифра", "фонтан"],
+    "flower": ["цветы", "срезка", "зелень", "роза", "хризантема", "питоспорум", "гвоздика", "антирринум", "диантус", "эвкалипт", "гипсофила", "рускус", "амариллис"],
+    "balloon": ["шары", "шар", "сфера", "баблс", "фольга", "бабл"]
+}
+
 BLACKLIST = ["сырье", "эклер", "тарталет", "кофе", "сырник", "чиабатта", "багет", "булочк", "круассан", "сосиска", "кремибон", "макарон", "десерт", "напиток"]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-LOG = logging.getLogger("sync_showcase")
+LOG = logging.getLogger("sync_inventory")
 
 class ApiError(Exception): pass
 
@@ -67,8 +78,7 @@ def resolve_ref(ref, included_index):
 
 def pick_price(attributes):
     if not attributes: return 0.0
-    # Ищем цену по всем возможным полям, включая специфичные для рецептов maxPrice/minPrice
-    for key in ("price", "salePrice", "retailPrice", "sellingPrice", "value", "amount", "totalAmount", "maxPrice", "minPrice"):
+    for key in ("price", "salePrice", "retailPrice", "sellingPrice", "value", "amount", "totalAmount", "maxPrice", "minPrice", "basePrice", "regularPrice"):
         val = attributes.get(key)
         if isinstance(val, dict):
             val = val.get("amount") or val.get("value")
@@ -89,16 +99,17 @@ def extract_safe_price(row, attrs, idx):
     return 0.0
 
 def logo_from_included(row, included_index):
-    # Приоритет качественным фото: сначала ищем в images, затем в logo
-    for rel_name in ("images", "logo", "image"):
+    for rel_name in ("images", "logo", "image", "picture", "photo"):
         refs = row.get("relationships", {}).get(rel_name, {}).get("data")
+        if not refs: continue
         refs = [refs] if isinstance(refs, dict) else (refs if isinstance(refs, list) else [])
         for ref in refs:
             inc = resolve_ref(ref, included_index)
             if inc:
                 attrs = inc.get("attributes") or {}
-                for k in ("url", "originalUrl", "fullUrl", "link"):
-                    if attrs.get(k): return str(attrs[k]).strip()
+                for k in ("url", "originalUrl", "fullUrl", "link", "src", "path"):
+                    val = attrs.get(k)
+                    if val: return str(val).strip()
     return ""
 
 def env_bool(name):
@@ -193,10 +204,7 @@ class MoySkladClient(HttpClient):
             params = {"limit": limit, "offset": offset}
             if extra_params: params.update(extra_params)
             body = self.request("GET", path, params=params)
-            
-            if isinstance(body, list):
-                return body
-                
+            if isinstance(body, list): return body
             batch = body.get("rows", [])
             out.extend(batch)
             if len(batch) < limit: break
@@ -217,52 +225,82 @@ def download_image(url, base_url):
     img.save(buf, format="JPEG", quality=IMAGE_JPEG_QUALITY, optimize=True)
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
-def fetch_showcase_items(pf, store_id):
-    """Выгружает все товары и рецепты, у которых включен флаг public=True"""
+def match_category(name, cat_title, is_public=False):
+    # ПРАВИЛО 1: Если товар выведен на сайт, его дом - только Витрина Tilda
+    if is_public: return "showcase"
+    
+    # ПРАВИЛО 2: Стандартное распределение
+    text_to_check = f"{name} {cat_title}"
+    low = normalize_name(text_to_check)
+    for cat_key, keywords in MS_FOLDER_KEYWORDS.items():
+        if cat_key == "showcase": continue 
+        for kw in keywords:
+            if kw in low: return cat_key
+    return None
+
+def fetch_inventory_from_pf(pf, store_id):
+    rows, included = pf.paginate("/inventory-items", {"include": "category,logo,images,prices", "page[size]": 100}, MAX_PAGES)
+    idx = build_included_index(included)
     res = []
     
-    # 1. Штучные товары для витрины
-    rows_inv, inc_inv = pf.paginate("/inventory-items", {"include": "category,logo,images,prices", "page[size]": 100}, MAX_PAGES)
-    idx_inv = build_included_index(inc_inv)
-    for r in rows_inv:
+    for r in rows:
         attrs = r.get("attributes", {})
-        if attrs.get("public") is not True: continue
-        
         name = str(attrs.get("title") or attrs.get("name") or "").strip()
         if not name or is_blacklisted(name): continue
         
-        price = extract_safe_price(r, attrs, idx_inv)
+        cat_title = ""
+        cat_data = r.get("relationships", {}).get("category", {}).get("data")
+        cat_ref = resolve_ref(cat_data, idx)
+        if cat_ref: cat_title = str(cat_ref.get("attributes", {}).get("title", ""))
+        if is_blacklisted(cat_title): continue
+        
+        is_public = attrs.get("public") is True
+        mapped_cat = match_category(name, cat_title, is_public)
+        if not mapped_cat: continue 
+        
+        price = extract_safe_price(r, attrs, idx)
         item_id = str(r.get("id"))
         qty = pf.get_inventory_qty(item_id, store_id)
         
         res.append({
             "id": item_id, "name": name, "price_kopecks": int(round(price * 100)),
-            "image_url": logo_from_included(r, idx_inv), "qty": qty
+            "image_url": logo_from_included(r, idx), "category": mapped_cat, "qty": qty
         })
-        
-    # 2. Рецепты (Авторские букеты) для витрины
-    try:
-        rows_rec, inc_rec = pf.paginate("/specifications", {"include": "category,logo,images,prices", "page[size]": 100}, MAX_PAGES)
-        idx_rec = build_included_index(inc_rec)
-        for r in rows_rec:
-            attrs = r.get("attributes", {})
-            if attrs.get("public") is not True: continue
-            
-            name = str(attrs.get("title") or attrs.get("name") or "").strip()
-            if not name or is_blacklisted(name): continue
-            
-            price = extract_safe_price(r, attrs, idx_rec)
-            item_id = str(r.get("id"))
-            qty = pf.get_inventory_qty(item_id, store_id)
-            
-            res.append({
-                "id": item_id, "name": name, "price_kopecks": int(round(price * 100)),
-                "image_url": logo_from_included(r, idx_rec), "qty": qty
-            })
-    except Exception as e:
-        LOG.error(f"Posiflora: Ошибка при запросе рецептов витрины: {e}")
+    LOG.info(f"Posiflora: Отобрано {len(res)} целевых штучных товаров.")
+    return res
 
-    LOG.info(f"Posiflora: Отобрано {len(res)} публичных товаров для витрины (public=True).")
+def fetch_recipes_from_pf(pf, store_id):
+    try:
+        rows, included = pf.paginate("/specifications", {"include": "category,logo,images,prices", "page[size]": 100}, MAX_PAGES)
+    except Exception as e:
+        LOG.error(f"Posiflora: Ошибка при запросе рецептов (/specifications): {e}")
+        return []
+        
+    idx = build_included_index(included)
+    res = []
+    
+    for r in rows:
+        attrs = r.get("attributes", {})
+        name = str(attrs.get("title") or attrs.get("name") or "").strip()
+        if not name or is_blacklisted(name): continue
+        
+        cat_title = ""
+        cat_data = r.get("relationships", {}).get("category", {}).get("data")
+        cat_ref = resolve_ref(cat_data, idx)
+        if cat_ref: cat_title = str(cat_ref.get("attributes", {}).get("title", ""))
+        
+        is_public = attrs.get("public") is True
+        mapped_cat = match_category(name, cat_title, is_public) or ("showcase" if is_public else "author")
+        
+        price = extract_safe_price(r, attrs, idx)
+        item_id = str(r.get("id"))
+        qty = pf.get_inventory_qty(item_id, store_id)
+        
+        res.append({
+            "id": item_id, "name": name, "price_kopecks": int(round(price * 100)),
+            "image_url": logo_from_included(r, idx), "category": mapped_cat, "qty": qty
+        })
+    LOG.info(f"Posiflora: Отобрано {len(res)} позиций из раздела рецептов (/specifications).")
     return res
 
 def main():
@@ -270,8 +308,7 @@ def main():
     config = {k: os.environ.get(k, "").strip() for k in keys}
     
     missing = [k for k, v in config.items() if not v]
-    if missing: 
-        sys.exit(f"Ошибка: не заданы переменные окружения: {', '.join(missing)}")
+    if missing: sys.exit(f"Ошибка: не заданы переменные: {', '.join(missing)}")
         
     dry_run = env_bool("DRY_RUN")
 
@@ -280,38 +317,38 @@ def main():
         pf = PosifloraClient(config["POSIFLORA_URL"], config["POSIFLORA_USER"], config["POSIFLORA_PASS"])
         pf.login()
 
-        # 1. Поиск папки "Витрина Tilda" в МоемСкладе
         folders = ms.list_entities("/entity/productfolder")
-        target_meta = None
+        folder_meta = {}
         for f in folders:
-            if normalize_name(f.get("name")) == normalize_name(TARGET_FOLDER_NAME):
-                target_meta = f.get("meta")
-                break
+            fname = normalize_name(f.get("name"))
+            for cat_key, keywords in MS_FOLDER_KEYWORDS.items():
+                if fname in keywords:
+                    folder_meta[cat_key] = f.get("meta")
+                    break
         
-        if not target_meta:
-            sys.exit(f"Папка {TARGET_FOLDER_NAME} не найдена в МоемСкладе!")
-
         price_types = ms.list_entities("/context/companysettings/pricetype")
         price_meta = next((pt["meta"] for pt in price_types if pt.get("name", "").lower() == "цена продажи"), price_types[0]["meta"])
 
-        # 2. Выгружаем все товары МоегоСклада
         ms_products = ms.list_entities("/entity/product", {"includeArchived": "false"})
         ms_index = {str(p.get("externalCode")): p for p in ms_products}
         
-        # 3. Выгружаем публичные товары из Posiflora
-        showcase_items = fetch_showcase_items(pf, config["TARGET_STORE_ID"])
-        stats = {"created": 0, "updated": 0, "archived_old": 0, "img_ok": 0, "img_err": 0}
+        pf_items = fetch_inventory_from_pf(pf, config["TARGET_STORE_ID"])
+        pf_recipes = fetch_recipes_from_pf(pf, config["TARGET_STORE_ID"])
+        pf_all = pf_items + pf_recipes
+        stats = {"created": 0, "updated": 0, "img_ok": 0, "img_err": 0}
 
-        # 4. Обновление карточек витрины в МоемСкладе
-        for b in showcase_items:
+        for b in pf_all:
+            target_folder = folder_meta.get(b["category"])
+            if not target_folder: continue
+            
             existing = ms_index.get(b["id"])
             payload = {}
             if existing:
                 if existing.get("name") != b["name"]: payload["name"] = b["name"][:255]
                 
                 curr_folder_href = existing.get("productFolder", {}).get("meta", {}).get("href", "")
-                if target_meta["href"] != curr_folder_href:
-                    payload["productFolder"] = {"meta": target_meta}
+                if target_folder["href"] != curr_folder_href:
+                    payload["productFolder"] = {"meta": target_folder}
                 
                 prices = existing.get("salePrices", [])
                 curr_price = prices[0].get("value", 0) if (prices and isinstance(prices, list)) else 0
@@ -326,7 +363,7 @@ def main():
             else:
                 payload = {
                     "name": b["name"][:255], "externalCode": b["id"],
-                    "productFolder": {"meta": target_meta},
+                    "productFolder": {"meta": target_folder},
                     "salePrices": [{"value": b["price_kopecks"], "priceType": {"meta": price_meta}}]
                 }
                 if not dry_run:
@@ -344,24 +381,13 @@ def main():
                 except Exception as e:
                     stats["img_err"] += 1
 
-        # 4.5 Очистка старых позиций с витрины
-        # Если товар лежит в "Витрина Tilda", но его больше нет в списке public=True, архивируем его
-        valid_showcase_ids = {b["id"] for b in showcase_items}
-        for code, p in ms_index.items():
-            if p.get("productFolder", {}).get("meta", {}).get("href") == target_meta["href"]:
-                if code not in valid_showcase_ids and not p.get("archived"):
-                    if not dry_run:
-                        ms.request("PUT", f"/entity/product/{p['id']}", json_body={"archived": True})
-                        stats["archived_old"] += 1
-
-        # 5. Синхронизация остатков
         stock_resp = ms.request("GET", "/report/stock/bystore/current", params={"filter": f"storeId={config['TARGET_STORE_ID']}"})
         current_stocks = stock_resp if isinstance(stock_resp, list) else stock_resp.get("rows", [])
         stock_dict = {s.get("assortmentId") or s.get("meta", {}).get("href", "").split("/")[-1]: safe_float(s.get("stock")) for s in current_stocks}
         
         enters, losses = [], []
         
-        for pf_item in showcase_items:
+        for pf_item in pf_all:
             ms_item = ms_index.get(pf_item["id"])
             if not ms_item: continue
             
@@ -384,13 +410,13 @@ def main():
                     ms.request("POST", endpoint, json_body={"organization": {"meta": org}, "store": {"meta": store}, "applicable": True, "positions": chunk})
                 LOG.info(f"{label}: проведено {len(chunk)} позиций")
 
-        if enters: post_docs("/entity/enter", enters, "Оприходование инвентаря витрины")
-        if losses: post_docs("/entity/loss", losses, "Списание инвентаря витрины")
+        if enters: post_docs("/entity/enter", enters, "Оприходование инвентаря")
+        if losses: post_docs("/entity/loss", losses, "Списание инвентаря")
 
-        LOG.info(f"Итоги витрины: {stats}")
+        LOG.info(f"Итоги инвентаря: {stats}")
 
     except Exception as e:
-        LOG.error(f"Критическая ошибка витрины: {e}")
+        LOG.error(f"Критическая ошибка: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":
