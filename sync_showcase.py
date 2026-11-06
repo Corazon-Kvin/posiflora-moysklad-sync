@@ -89,7 +89,7 @@ def extract_safe_price(row, attrs, idx):
     return 0.0
 
 def logo_from_included(row, included_index):
-    for rel_name in ("images", "logo", "image", "picture", "photo"):
+    for rel_name in ("images", "logo", "image", "picture", "photo", "files", "file"):
         refs = row.get("relationships", {}).get(rel_name, {}).get("data")
         if not refs: continue
         refs = [refs] if isinstance(refs, dict) else (refs if isinstance(refs, list) else [])
@@ -97,7 +97,7 @@ def logo_from_included(row, included_index):
             inc = resolve_ref(ref, included_index)
             if inc:
                 attrs = inc.get("attributes") or {}
-                for k in ("url", "originalUrl", "fullUrl", "link", "src", "path"):
+                for k in ("url", "originalUrl", "fullUrl", "link", "src", "path", "fileUrl"):
                     val = attrs.get(k)
                     if val: return str(val).strip()
                     
@@ -242,12 +242,12 @@ def fetch_showcase_items(pf, store_id):
             LOG.warning(f"Posiflora: Не найдено фото для {name}")
             if not DEBUG_PRINTED:
                 LOG.info(f"\n=== ДИАГНОСТИКА ФОТО ДЛЯ: {name} ===")
-                LOG.info(f"Связи (relationships.images/logo): {r.get('relationships', {}).get('images')} | {r.get('relationships', {}).get('logo')}")
-                images_in_idx = [v for k, v in idx_inv.items() if 'image' in str(k[0]).lower() or 'logo' in str(k[0]).lower()]
+                LOG.info(f"Связи (relationships): {r.get('relationships')}")
+                images_in_idx = [v for k, v in idx_inv.items() if any(x in str(k[0]).lower() for x in ['image', 'logo', 'file', 'photo', 'picture'])]
                 if images_in_idx:
                     LOG.info(f"СЫРОЙ JSON ФОТО (ИЗ INCLUDED):\n{images_in_idx[0]}")
                 else:
-                    LOG.info("В INCLUDED ВООБЩЕ НЕТ КАРТИНОК! Сервер не прислал.")
+                    LOG.info("В INCLUDED ВООБЩЕ НЕТ КАРТИНОК ИЛИ ФАЙЛОВ! Сервер их не отдал.")
                 LOG.info("=======================================\n")
                 DEBUG_PRINTED = True
         
@@ -271,12 +271,12 @@ def fetch_showcase_items(pf, store_id):
                 LOG.warning(f"Posiflora: Не найдено фото для {name}")
                 if not DEBUG_PRINTED:
                     LOG.info(f"\n=== ДИАГНОСТИКА ФОТО ДЛЯ: {name} ===")
-                    LOG.info(f"Связи (relationships.images/logo): {r.get('relationships', {}).get('images')} | {r.get('relationships', {}).get('logo')}")
-                    images_in_idx = [v for k, v in idx_rec.items() if 'image' in str(k[0]).lower() or 'logo' in str(k[0]).lower()]
+                    LOG.info(f"Связи (relationships): {r.get('relationships')}")
+                    images_in_idx = [v for k, v in idx_rec.items() if any(x in str(k[0]).lower() for x in ['image', 'logo', 'file', 'photo', 'picture'])]
                     if images_in_idx:
                         LOG.info(f"СЫРОЙ JSON ФОТО (ИЗ INCLUDED):\n{images_in_idx[0]}")
                     else:
-                        LOG.info("В INCLUDED ВООБЩЕ НЕТ КАРТИНОК! Сервер не прислал.")
+                        LOG.info("В INCLUDED ВООБЩЕ НЕТ КАРТИНОК ИЛИ ФАЙЛОВ! Сервер их не отдал.")
                     LOG.info("=======================================\n")
                     DEBUG_PRINTED = True
             
