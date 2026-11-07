@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # Скрипт 2: ИНВЕНТАРЬ И ОСТАТКИ (sync_inventory.py)
-# Задача: Синхронизация штучных товаров и рецептов. Согласован с витриной.
+# Задача: Синхронизация постоянного склада и рецептов (шаблонов). Игнорирует витрину.
 # Запуск: Каждые 2-3 часа.
 
 import base64
@@ -30,9 +30,8 @@ IMAGE_JPEG_QUALITY = 85
 
 BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
-# Сюда добавлена папка витрины, чтобы скрипт знал ее координаты
+# Стандартные папки (без витрины)
 MS_FOLDER_KEYWORDS = {
-    "showcase": ["витрина tilda"],
     "author": ["авторские букеты", "рецепты"], 
     "vase": ["вазы", "ваза"],
     "toy": ["игрушки", "игрушк", "медведь", "заяц"],
@@ -50,9 +49,7 @@ LOG = logging.getLogger("sync_inventory")
 
 class ApiError(Exception): pass
 
-# -----------------------------------------------------------------------------
 # УТИЛИТЫ И API КЛИЕНТЫ
-# -----------------------------------------------------------------------------
 def safe_float(value, default=0.0):
     if value is None or isinstance(value, bool): return default
     if isinstance(value, (int, float)): return float(value)
@@ -107,16 +104,9 @@ def logo_from_included(row, included_index):
             inc = resolve_ref(ref, included_index)
             if inc:
                 attrs = inc.get("attributes") or {}
-                # ДОБАВЛЕНЫ НОВЫЕ КЛЮЧИ ИЗ ДИАГНОСТИКИ
                 for k in ("file", "fileMedium", "fileShop", "url", "originalUrl", "fullUrl", "link", "src", "path", "fileUrl", "fileSmall"):
                     val = attrs.get(k)
                     if val: return str(val).strip()
-                    
-    attrs = row.get("attributes", {})
-    for k, v in attrs.items():
-        if isinstance(v, str) and (v.startswith("http") or v.startswith("//")) and any(ext in v.lower() for ext in [".jpg", ".jpeg", ".png", ".webp"]):
-            return v.strip()
-            
     return ""
 
 def env_bool(name):
@@ -218,9 +208,6 @@ class MoySkladClient(HttpClient):
             offset += limit
         return out
 
-# -----------------------------------------------------------------------------
-# ЛОГИКА
-# -----------------------------------------------------------------------------
 def download_image(url, base_url):
     full_url = f"https:{url}" if url.startswith("//") else (url if url.startswith("http") else urljoin(base_url.rstrip("/") + "/", url))
     h = {"User-Agent": BROWSER_UA, "Accept": "image/*"}
@@ -232,15 +219,10 @@ def download_image(url, base_url):
     img.save(buf, format="JPEG", quality=IMAGE_JPEG_QUALITY, optimize=True)
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
-def match_category(name, cat_title, is_public=False):
-    # ПРАВИЛО 1: Если товар выведен на сайт, его дом - только Витрина Tilda
-    if is_public: return "showcase"
-    
-    # ПРАВИЛО 2: Стандартное распределение
+def match_category(name, cat_title):
     text_to_check = f"{name} {cat_title}"
     low = normalize_name(text_to_check)
     for cat_key, keywords in MS_FOLDER_KEYWORDS.items():
-        if cat_key == "showcase": continue 
         for kw in keywords:
             if kw in low: return cat_key
     return None
@@ -261,8 +243,7 @@ def fetch_inventory_from_pf(pf, store_id):
         if cat_ref: cat_title = str(cat_ref.get("attributes", {}).get("title", ""))
         if is_blacklisted(cat_title): continue
         
-        is_public = attrs.get("public") is True
-        mapped_cat = match_category(name, cat_title, is_public)
+        mapped_cat = match_category(name, cat_title)
         if not mapped_cat: continue 
         
         price = extract_safe_price(r, attrs, idx)
@@ -299,8 +280,8 @@ def fetch_recipes_from_pf(pf, store_id):
         cat_ref = resolve_ref(cat_data, idx)
         if cat_ref: cat_title = str(cat_ref.get("attributes", {}).get("title", ""))
         
-        is_public = attrs.get("public") is True
-        mapped_cat = match_category(name, cat_title, is_public) or ("showcase" if is_public else "author")
+        # Рецепты всегда идут в "Авторские букеты" (author), если не найдены другие ключи (вазы, шары)
+        mapped_cat = match_category(name, cat_title) or "author"
         
         price = extract_safe_price(r, attrs, idx)
         item_id = str(r.get("id"))
@@ -391,10 +372,8 @@ def main():
                 try:
                     img_data = download_image(b["image_url"], config["POSIFLORA_URL"])
                     ms.request("POST", f"/entity/product/{prod_id}/images", json_body={"filename": f"{b['id']}.jpg", "content": img_data})
-                    LOG.info(f"Загружено фото для: {b['name']}")
                     stats["img_ok"] += 1
                 except Exception as e:
-                    LOG.error(f"Ошибка загрузки фото для {b['name']}: {e}")
                     stats["img_err"] += 1
 
         stock_resp = ms.request("GET", "/report/stock/bystore/current", params={"filter": f"storeId={config['TARGET_STORE_ID']}"})
