@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# Скрипт-спасатель: ВОССТАНОВЛЕНИЕ ТОВАРОВ КОФЕЙНИ
+# Скрипт-спасатель 2.0: ВОССТАНОВЛЕНИЕ ТОВАРОВ КОФЕЙНИ
 # Задача: Найти все заархивированные товары вне папки "Цветы лакма" и снять с них архив.
 
 import logging
@@ -89,23 +89,21 @@ def main():
             if "Цветы лакма" in path_name or "Цветы лакма" in name:
                 flower_hrefs.add(f.get("meta", {}).get("href"))
 
-        LOG.info("Запрашиваем базу товаров (включая архивные)...")
-        # Запрашиваем ВСЕ товары, включая те, что в архиве
-        products = ms.list_entities("/entity/product", {"includeArchived": "true"})
+        LOG.info("Запрашиваем базу АРХИВНЫХ товаров...")
+        # ИСПОЛЬЗУЕМ ЖЕСТКИЙ ФИЛЬТР МОЕГОСКЛАДА ДЛЯ АРХИВА
+        products = ms.list_entities("/entity/product", {"filter": "archived=true"})
         
         restored_count = 0
 
         for p in products:
-            is_archived = p.get("archived", False)
-            if is_archived:
-                folder_href = p.get("productFolder", {}).get("meta", {}).get("href", "")
-                
-                # Если товар заархивирован и НЕ принадлежит к папкам цветов — восстанавливаем
-                if folder_href not in flower_hrefs:
-                    if not dry_run:
-                        ms.request("PUT", f"/entity/product/{p['id']}", json_body={"archived": False})
-                    restored_count += 1
-                    LOG.info(f"Восстановлен товар: {p.get('name')}")
+            folder_href = p.get("productFolder", {}).get("meta", {}).get("href", "")
+            
+            # Если архивный товар НЕ принадлежит к папкам цветов — восстанавливаем
+            if folder_href not in flower_hrefs:
+                if not dry_run:
+                    ms.request("PUT", f"/entity/product/{p['id']}", json_body={"archived": False})
+                restored_count += 1
+                LOG.info(f"Восстановлен товар: {p.get('name')}")
 
         LOG.info(f"Готово! Успешно восстановлено товаров кофейни: {restored_count}")
 
