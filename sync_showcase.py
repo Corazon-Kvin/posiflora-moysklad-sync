@@ -200,7 +200,8 @@ def fetch_live_bouquets(pf, store_id):
     res = []
     try:
         LOG.info("Posiflora: Стучимся в раздел собранных букетов (/bouquets)...")
-        rows, inc = pf.paginate("/bouquets", {"include": "logo,images,prices", "page[size]": 100}, MAX_PAGES)
+        # Убрали 'prices' из списка include, чтобы не было ошибки 422
+        rows, inc = pf.paginate("/bouquets", {"include": "logo,images", "page[size]": 100}, MAX_PAGES)
         idx = build_included_index(inc)
         
         LOG.info(f"Posiflora: Сервер отдал {len(rows)} записей в /bouquets.")
