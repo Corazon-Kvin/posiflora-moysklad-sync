@@ -2,8 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # Скрипт 1: ЖИВАЯ ВИТРИНА (sync_showcase.py)
-# Задача: Синхронизация СОБРАННЫХ ЭКЗЕМПЛЯРОВ букетов и авто-архивация проданных/разобранных.
-# Запуск: Каждые 30 минут.
+# Задача: Синхронизация СОБРАННЫХ ЭКЗЕМПЛЯРОВ букетов, авто-архивация и начисление остатка.
 
 import base64
 import io
@@ -17,9 +16,6 @@ from urllib.parse import urljoin
 import requests
 from PIL import Image
 
-# -----------------------------------------------------------------------------
-# КОНСТАНТЫ
-# -----------------------------------------------------------------------------
 REQUEST_PAUSE = 0.05
 MAX_RETRIES = 5
 HTTP_TIMEOUT = 60
@@ -36,9 +32,6 @@ LOG = logging.getLogger("sync_showcase")
 
 class ApiError(Exception): pass
 
-# -----------------------------------------------------------------------------
-# УТИЛИТЫ И API КЛИЕНТЫ
-# -----------------------------------------------------------------------------
 def safe_float(value, default=0.0):
     if value is None or isinstance(value, bool): return default
     if isinstance(value, (int, float)): return float(value)
@@ -60,8 +53,7 @@ def pick_price(attributes):
     if not attributes: return 0.0
     for key in ("price", "salePrice", "retailPrice", "sellingPrice", "value", "amount", "totalAmount", "maxPrice", "minPrice", "basePrice", "regularPrice"):
         val = attributes.get(key)
-        if isinstance(val, dict):
-            val = val.get("amount") or val.get("value")
+        if isinstance(val, dict): val = val.get("amount") or val.get("value")
         val = safe_float(val)
         if val > 0: return val
     return 0.0
@@ -71,11 +63,9 @@ def extract_safe_price(row, attrs, idx):
     if p > 0: return p
     prices_data = row.get("relationships", {}).get("prices", {}).get("data")
     if not prices_data: return 0.0
-    
     ref_item = prices_data[0] if isinstance(prices_data, list) and len(prices_data) > 0 else prices_data
     ref_obj = resolve_ref(ref_item, idx)
-    if ref_obj:
-        return pick_price(ref_obj.get("attributes"))
+    if ref_obj: return pick_price(ref_obj.get("attributes"))
     return 0.0
 
 def logo_from_included(row, included_index):
@@ -182,9 +172,6 @@ class MoySkladClient(HttpClient):
             offset += limit
         return out
 
-# -----------------------------------------------------------------------------
-# ЛОГИКА
-# -----------------------------------------------------------------------------
 def download_image(url, base_url):
     full_url = f"https:{url}" if url.startswith("//") else (url if url.startswith("http") else urljoin(base_url.rstrip("/") + "/", url))
     h = {"User-Agent": BROWSER_UA, "Accept": "image/*"}
@@ -199,44 +186,25 @@ def download_image(url, base_url):
 def fetch_live_bouquets(pf, store_id):
     res = []
     try:
-        LOG.info("Posiflora: Стучимся в раздел собранных букетов (/bouquets)...")
         rows, inc = pf.paginate("/bouquets", {"include": "logo,images", "page[size]": 100}, MAX_PAGES)
         idx = build_included_index(inc)
-        
-        LOG.info(f"Posiflora: Сервер отдал {len(rows)} исторических записей.")
-        
         for r in rows:
             attrs = r.get("attributes", {})
-            
-            # --- НОВЫЙ ФИЛЬТР СТАТУСОВ ---
-            # Отбираем только букеты со статусом 'demonstrated'
             status = str(attrs.get("status", "")).lower()
-            if status != "demonstrated":
-                continue
-            
+            if status != "demonstrated": continue
             name = str(attrs.get("title") or attrs.get("name") or "").strip()
             if not name: name = f"Букет {str(r.get('id'))[-4:]}"
-            
             price = extract_safe_price(r, attrs, idx)
-            item_id = str(r.get("id"))
-            
-            img_url = logo_from_included(r, idx)
-            
-            res.append({"id": item_id, "name": name, "price_kopecks": int(round(price * 100)), "image_url": img_url, "qty": 1.0})
-            
+            res.append({"id": str(r.get("id")), "name": name, "price_kopecks": int(round(price * 100)), "image_url": logo_from_included(r, idx), "qty": 1.0})
     except Exception as e:
         LOG.error(f"Posiflora: ОШИБКА доступа к /bouquets: {e}")
-
     LOG.info(f"Posiflora: В итоге отобрано {len(res)} АКТИВНЫХ букетов для витрины.")
     return res
 
 def main():
     keys = ["POSIFLORA_USER", "POSIFLORA_PASS", "POSIFLORA_URL", "MOYSKLAD_TOKEN", "MOYSKLAD_URL", "TARGET_STORE_ID", "ORG_ID"]
     config = {k: os.environ.get(k, "").strip() for k in keys}
-    
-    missing = [k for k, v in config.items() if not v]
-    if missing: sys.exit(f"Ошибка: не заданы переменные: {', '.join(missing)}")
-        
+    if not all(config.values()): sys.exit("Ошибка: не заданы переменные")
     dry_run = env_bool("DRY_RUN")
 
     try:
@@ -245,12 +213,7 @@ def main():
         pf.login()
 
         folders = ms.list_entities("/entity/productfolder")
-        target_meta = None
-        for f in folders:
-            if normalize_name(f.get("name")) == normalize_name(TARGET_FOLDER_NAME):
-                target_meta = f.get("meta")
-                break
-        
+        target_meta = next((f.get("meta") for f in folders if normalize_name(f.get("name")) == normalize_name(TARGET_FOLDER_NAME)), None)
         if not target_meta: sys.exit(f"Папка {TARGET_FOLDER_NAME} не найдена в МоемСкладе!")
 
         price_types = ms.list_entities("/context/companysettings/pricetype")
@@ -260,36 +223,24 @@ def main():
         ms_index = {str(p.get("externalCode")): p for p in ms_products}
         
         showcase_items = fetch_live_bouquets(pf, config["TARGET_STORE_ID"])
-        stats = {"created": 0, "updated": 0, "archived_sold": 0, "img_ok": 0, "img_err": 0}
+        stats = {"created": 0, "updated": 0, "archived_sold": 0, "entered": 0, "img_ok": 0, "img_err": 0}
 
-        # 1. Обновляем или создаем живые букеты
+        # 1. ОБНОВЛЕНИЕ КАРТОЧЕК
         for b in showcase_items:
             existing = ms_index.get(b["id"])
-            payload = {}
             if existing:
+                payload = {}
                 if existing.get("name") != b["name"]: payload["name"] = b["name"][:255]
-                
-                curr_folder_href = existing.get("productFolder", {}).get("meta", {}).get("href", "")
-                if target_meta["href"] != curr_folder_href:
-                    payload["productFolder"] = {"meta": target_meta}
-                
+                if target_meta["href"] != existing.get("productFolder", {}).get("meta", {}).get("href", ""): payload["productFolder"] = {"meta": target_meta}
                 prices = existing.get("salePrices", [])
                 curr_price = prices[0].get("value", 0) if (prices and isinstance(prices, list)) else 0
-                if curr_price != b["price_kopecks"] and b["price_kopecks"] > 0:
-                    payload["salePrices"] = [{"value": b["price_kopecks"], "priceType": {"meta": price_meta}}]
-                
+                if curr_price != b["price_kopecks"] and b["price_kopecks"] > 0: payload["salePrices"] = [{"value": b["price_kopecks"], "priceType": {"meta": price_meta}}]
                 if payload and not dry_run:
                     ms.request("PUT", f"/entity/product/{existing['id']}", json_body=payload)
                     stats["updated"] += 1
-                prod_id = existing["id"]
-                
-                has_image = existing.get("images", {}).get("meta", {}).get("size", 0) > 0
+                prod_id, has_image = existing["id"], existing.get("images", {}).get("meta", {}).get("size", 0) > 0
             else:
-                payload = {
-                    "name": b["name"][:255], "externalCode": b["id"],
-                    "productFolder": {"meta": target_meta},
-                    "salePrices": [{"value": b["price_kopecks"], "priceType": {"meta": price_meta}}]
-                }
+                payload = {"name": b["name"][:255], "externalCode": b["id"], "productFolder": {"meta": target_meta}, "salePrices": [{"value": b["price_kopecks"], "priceType": {"meta": price_meta}}]}
                 if not dry_run:
                     created = ms.request("POST", "/entity/product", json_body=payload)
                     prod_id = created["id"]
@@ -302,23 +253,32 @@ def main():
                     img_data = download_image(b["image_url"], config["POSIFLORA_URL"])
                     ms.request("POST", f"/entity/product/{prod_id}/images", json_body={"filename": f"{b['id']}.jpg", "content": img_data})
                     stats["img_ok"] += 1
-                except Exception as e:
-                    stats["img_err"] += 1
+                except: stats["img_err"] += 1
 
-        # 2. АВТО-УДАЛЕНИЕ ПРОДАННЫХ БУКЕТОВ (Архивация)
-        valid_showcase_ids = {b["id"] for b in showcase_items}
+        # 2. АРХИВАЦИЯ
+        valid_ids = {b["id"] for b in showcase_items}
         for code, p in ms_index.items():
-            if p.get("productFolder", {}).get("meta", {}).get("href") == target_meta["href"]:
-                if code not in valid_showcase_ids and not p.get("archived"):
-                    if not dry_run:
-                        ms.request("PUT", f"/entity/product/{p['id']}", json_body={"archived": True})
-                        stats["archived_sold"] += 1
+            if p.get("productFolder", {}).get("meta", {}).get("href") == target_meta["href"] and code not in valid_ids and not p.get("archived"):
+                if not dry_run:
+                    ms.request("PUT", f"/entity/product/{p['id']}", json_body={"archived": True})
+                    stats["archived_sold"] += 1
+
+        # 3. НАЧИСЛЕНИЕ ОСТАТКОВ
+        stock_resp = ms.request("GET", "/report/stock/bystore/current", params={"filter": f"storeId={config['TARGET_STORE_ID']}"})
+        stock_dict = {s.get("assortmentId"): safe_float(s.get("stock")) for s in (stock_resp if isinstance(stock_resp, list) else stock_resp.get("rows", []))}
+        enters = []
+        for b in showcase_items:
+            ms_item = ms_index.get(b["id"])
+            if ms_item and stock_dict.get(ms_item["id"], 0.0) < 1.0:
+                enters.append({"assortment": {"meta": ms_item["meta"]}, "quantity": 1.0, "price": 0})
+        
+        if enters:
+            org = {"href": f"{config['MOYSKLAD_URL']}/entity/organization/{config['ORG_ID']}", "type": "organization", "mediaType": "application/json"}
+            store = {"href": f"{config['MOYSKLAD_URL']}/entity/store/{config['TARGET_STORE_ID']}", "type": "store", "mediaType": "application/json"}
+            if not dry_run: ms.request("POST", "/entity/enter", json_body={"organization": {"meta": org}, "store": {"meta": store}, "applicable": True, "positions": enters})
+            stats["entered"] = len(enters)
 
         LOG.info(f"Итоги витрины: {stats}")
+    except Exception as e: LOG.error(f"Критическая ошибка витрины: {e}"); sys.exit(1)
 
-    except Exception as e:
-        LOG.error(f"Критическая ошибка витрины: {e}")
-        sys.exit(1)
-
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()
