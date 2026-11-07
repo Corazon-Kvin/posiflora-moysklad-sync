@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # Скрипт 2: ИНВЕНТАРЬ И ОСТАТКИ (sync_inventory.py)
+# С умным поиском по названию (защита от дубликатов)
 
 import base64
 import io
@@ -40,6 +41,7 @@ BLACKLIST = ["сырье", "эклер", "тарталет", "кофе", "сыр
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 LOG = logging.getLogger("sync_inventory")
+
 class ApiError(Exception): pass
 
 def safe_float(value, default=0.0):
@@ -235,6 +237,7 @@ def fetch_recipes_from_pf(pf, store_id):
             "image_url": logo_from_included(r, idx), "category": match_category(name, cat_title) or "author",
             "qty": pf.get_inventory_qty(str(r.get("id")), store_id)
         })
+    LOG.info(f"Posiflora: Получено рецептов - {len(res)} шт.")
     return res
 
 def main():
@@ -260,7 +263,10 @@ def main():
         price_meta = next((pt["meta"] for pt in price_types if pt.get("name", "").lower() == "цена продажи"), price_types[0]["meta"])
 
         ms_products = ms.list_entities("/entity/product", {"includeArchived": "false"})
-        ms_index = {str(p.get("externalCode")): p for p in ms_products}
+        
+        # Создаем ДВА индекса для защиты от дубликатов
+        ms_index_by_code = {str(p.get("externalCode")): p for p in ms_products if p.get("externalCode")}
+        ms_index_by_name = {normalize_name(p.get("name")): p for p in ms_products}
         
         pf_all = fetch_inventory_from_pf(pf, pf_store_id) + fetch_recipes_from_pf(pf, pf_store_id)
         stats = {"created": 0, "updated": 0, "img_ok": 0, "img_err": 0}
@@ -268,21 +274,35 @@ def main():
         for b in pf_all:
             target_folder = folder_meta.get(b["category"])
             if not target_folder: continue
-            existing = ms_index.get(b["id"])
+            
+            # Умный поиск: сначала по коду, затем по точному совпадению названия
+            existing = ms_index_by_code.get(b["id"])
+            if not existing:
+                existing = ms_index_by_name.get(normalize_name(b["name"]))
+
             if existing:
                 payload = {}
+                # Если нашли по имени, но код старый — привязываем правильный код
+                if str(existing.get("externalCode")) != str(b["id"]): payload["externalCode"] = b["id"]
                 if existing.get("name") != b["name"]: payload["name"] = b["name"][:255]
                 if target_folder["href"] != existing.get("productFolder", {}).get("meta", {}).get("href", ""): payload["productFolder"] = {"meta": target_folder}
+                
                 prices = existing.get("salePrices", [])
                 curr_price = prices[0].get("value", 0) if (prices and isinstance(prices, list)) else 0
                 if curr_price != b["price_kopecks"] and b["price_kopecks"] > 0: payload["salePrices"] = [{"value": b["price_kopecks"], "priceType": {"meta": price_meta}}]
-                if payload and not dry_run: ms.request("PUT", f"/entity/product/{existing['id']}", json_body=payload); stats["updated"] += 1
+                
+                if payload and not dry_run: 
+                    ms.request("PUT", f"/entity/product/{existing['id']}", json_body=payload)
+                    stats["updated"] += 1
+                
                 prod_id, has_image = existing["id"], existing.get("images", {}).get("meta", {}).get("size", 0) > 0
+                ms_index_by_code[b["id"]] = existing # Обновляем индекс
             else:
                 payload = {"name": b["name"][:255], "externalCode": b["id"], "productFolder": {"meta": target_folder}, "salePrices": [{"value": b["price_kopecks"], "priceType": {"meta": price_meta}}]}
                 if not dry_run:
                     created = ms.request("POST", "/entity/product", json_body=payload)
-                    prod_id, ms_index[b["id"]] = created["id"], created
+                    prod_id = created["id"]
+                    ms_index_by_code[b["id"]] = created
                     stats["created"] += 1
                 has_image = False
 
@@ -298,7 +318,7 @@ def main():
         
         enters, losses = [], []
         for pf_item in pf_all:
-            ms_item = ms_index.get(pf_item["id"])
+            ms_item = ms_index_by_code.get(pf_item["id"])
             if not ms_item: continue
             target_qty, curr_qty = pf_item["qty"], stock_dict.get(ms_item["id"], 0.0)
             diff = round(target_qty - curr_qty, 3)
