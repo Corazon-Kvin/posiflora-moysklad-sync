@@ -200,7 +200,6 @@ def fetch_live_bouquets(pf, store_id):
     res = []
     try:
         LOG.info("Posiflora: Стучимся в раздел собранных букетов (/bouquets)...")
-        # Убрали 'prices' из списка include, чтобы не было ошибки 422
         rows, inc = pf.paginate("/bouquets", {"include": "logo,images", "page[size]": 100}, MAX_PAGES)
         idx = build_included_index(inc)
         
@@ -208,6 +207,9 @@ def fetch_live_bouquets(pf, store_id):
         
         for r in rows:
             attrs = r.get("attributes", {})
+            
+            # ВЕРНУЛИ ФИЛЬТР: Отбираем только букеты со статусом "На сайте"
+            if attrs.get("public") is not True: continue
             
             name = str(attrs.get("title") or attrs.get("name") or "").strip()
             if not name: name = f"Букет {str(r.get('id'))[-4:]}"
