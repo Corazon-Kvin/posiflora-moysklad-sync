@@ -199,33 +199,29 @@ def download_image(url, base_url):
 def fetch_live_bouquets(pf, store_id):
     res = []
     try:
-        # Запрашиваем физически собранные букеты
+        LOG.info("Posiflora: Стучимся в раздел собранных букетов (/bouquets)...")
         rows, inc = pf.paginate("/bouquets", {"include": "logo,images,prices", "page[size]": 100}, MAX_PAGES)
         idx = build_included_index(inc)
+        
+        LOG.info(f"Posiflora: Сервер отдал {len(rows)} записей в /bouquets.")
         
         for r in rows:
             attrs = r.get("attributes", {})
             
-            # Проверяем, выведен ли букет на витрину (public=True)
-            if attrs.get("public") is not True: continue
-            
             name = str(attrs.get("title") or attrs.get("name") or "").strip()
-            if not name: name = f"Букет {str(r.get('id'))[-4:]}" # Запасное имя, если пустое
+            if not name: name = f"Букет {str(r.get('id'))[-4:]}"
             
             price = extract_safe_price(r, attrs, idx)
             item_id = str(r.get("id"))
             
             img_url = logo_from_included(r, idx)
-            if not img_url: LOG.warning(f"Posiflora: Не найдено фото для {name}")
             
-            # У живых букетов остаток всегда = 1 (уникальный экземпляр)
             res.append({"id": item_id, "name": name, "price_kopecks": int(round(price * 100)), "image_url": img_url, "qty": 1.0})
             
     except Exception as e:
-        LOG.error(f"Posiflora: Ошибка при запросе собранных букетов (/bouquets): {e}")
-        # Если эндпоинт другой, скрипт выведет ошибку в лог, и мы это сразу увидим.
+        LOG.error(f"Posiflora: ОШИБКА доступа к /bouquets: {e}")
 
-    LOG.info(f"Posiflora: Отобрано {len(res)} ЖИВЫХ букетов для витрины.")
+    LOG.info(f"Posiflora: В итоге отобрано {len(res)} ЖИВЫХ букетов для витрины.")
     return res
 
 def main():
@@ -304,7 +300,6 @@ def main():
                     stats["img_err"] += 1
 
         # 2. АВТО-УДАЛЕНИЕ ПРОДАННЫХ БУКЕТОВ (Архивация)
-        # Если карточка лежит в папке витрины, но её больше нет в свежем списке Posiflora — в архив!
         valid_showcase_ids = {b["id"] for b in showcase_items}
         for code, p in ms_index.items():
             if p.get("productFolder", {}).get("meta", {}).get("href") == target_meta["href"]:
