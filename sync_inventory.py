@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # Скрипт 2: ИНВЕНТАРЬ И ОСТАТКИ (sync_inventory.py)
-# С умным поиском по названию (защита от дубликатов)
+# С умным поиском по названию и поддержкой ПОДАРОЧНЫХ СЕРТИФИКАТОВ
 
 import base64
 import io
@@ -26,7 +26,9 @@ IMAGE_JPEG_QUALITY = 85
 
 BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
+# ДОБАВЛЕНА КАТЕГОРИЯ СЕРТИФИКАТОВ
 MS_FOLDER_KEYWORDS = {
+    "certificate": ["подарочный сертификат", "сертификаты", "сертификат"],
     "author": ["авторские букеты", "рецепты"], 
     "vase": ["вазы", "ваза"],
     "toy": ["игрушки", "игрушк", "медведь", "заяц"],
@@ -264,7 +266,6 @@ def main():
 
         ms_products = ms.list_entities("/entity/product", {"includeArchived": "false"})
         
-        # Создаем ДВА индекса для защиты от дубликатов
         ms_index_by_code = {str(p.get("externalCode")): p for p in ms_products if p.get("externalCode")}
         ms_index_by_name = {normalize_name(p.get("name")): p for p in ms_products}
         
@@ -275,14 +276,12 @@ def main():
             target_folder = folder_meta.get(b["category"])
             if not target_folder: continue
             
-            # Умный поиск: сначала по коду, затем по точному совпадению названия
             existing = ms_index_by_code.get(b["id"])
             if not existing:
                 existing = ms_index_by_name.get(normalize_name(b["name"]))
 
             if existing:
                 payload = {}
-                # Если нашли по имени, но код старый — привязываем правильный код
                 if str(existing.get("externalCode")) != str(b["id"]): payload["externalCode"] = b["id"]
                 if existing.get("name") != b["name"]: payload["name"] = b["name"][:255]
                 if target_folder["href"] != existing.get("productFolder", {}).get("meta", {}).get("href", ""): payload["productFolder"] = {"meta": target_folder}
@@ -296,7 +295,7 @@ def main():
                     stats["updated"] += 1
                 
                 prod_id, has_image = existing["id"], existing.get("images", {}).get("meta", {}).get("size", 0) > 0
-                ms_index_by_code[b["id"]] = existing # Обновляем индекс
+                ms_index_by_code[b["id"]] = existing
             else:
                 payload = {"name": b["name"][:255], "externalCode": b["id"], "productFolder": {"meta": target_folder}, "salePrices": [{"value": b["price_kopecks"], "priceType": {"meta": price_meta}}]}
                 if not dry_run:
