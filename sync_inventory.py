@@ -24,6 +24,9 @@ MAX_PAGES = 1000
 IMAGE_MAX_SIDE = 1200
 IMAGE_JPEG_QUALITY = 85
 
+# Фиксированный остаток для всех рецептов (авторских букетов)
+FIXED_RECIPE_QTY = 50.0 
+
 BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
 # ДОБАВЛЕНА КАТЕГОРИЯ СЕРТИФИКАТОВ и обновлена "упаковка"
@@ -144,6 +147,7 @@ class PosifloraClient(HttpClient):
         self.token = resp.get("data", {}).get("attributes", {}).get("accessToken") or resp.get("data", {}).get("accessToken")
 
     def paginate(self, path, params, max_pages):
+        rows, included, page = 1, [], [] # small typo fixed here for safe var assignment, wait, python allows rows, included = [], []
         rows, included, page = [], [], 1
         while page <= max_pages:
             p = dict(params); p["page[number]"] = page
@@ -238,9 +242,11 @@ def fetch_recipes_from_pf(pf, store_id):
         res.append({
             "id": str(r.get("id")), "name": name, "price_kopecks": int(round(extract_safe_price(r, attrs, idx) * 100)),
             "image_url": logo_from_included(r, idx), "category": match_category(name, cat_title) or "author",
-            "qty": pf.get_inventory_qty(str(r.get("id")), store_id)
+            
+            # --- ИЗМЕНЕНИЕ: ТЕПЕРЬ ВСЕ РЕЦЕПТЫ ПОЛУЧАЮТ ФИКСИРОВАННЫЙ ОСТАТОК ---
+            "qty": FIXED_RECIPE_QTY  
         })
-    LOG.info(f"Posiflora: Получено рецептов - {len(res)} шт.")
+    LOG.info(f"Posiflora: Получено рецептов - {len(res)} шт. (Остаток у всех зафиксирован на уровне {FIXED_RECIPE_QTY})")
     return res
 
 def main():
