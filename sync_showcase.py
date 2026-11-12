@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 
 # Скрипт 1: ЖИВАЯ ВИТРИНА (sync_showcase.py)
-# Задача: Синхронизация СОБРАННЫХ ЭКЗЕМПЛЯРОВ букетов, авто-архивация и начисление остатка.
+# С поддержкой многостраничной загрузки (до 1000 букетов)
+# и умным поиском папки в МоемСкладе
 
 import base64
 import io
@@ -24,7 +25,10 @@ MAX_PAGES = 1000
 IMAGE_MAX_SIDE = 1200
 IMAGE_JPEG_QUALITY = 85
 
-TARGET_FOLDER_NAME = "Витрина Tilda"
+# --- ИЗМЕНЕНИЕ ИМЕНИ ПАПКИ ---
+TARGET_FOLDER_NAME = "Онлайн витрина"
+# -----------------------------
+
 BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
@@ -223,14 +227,16 @@ def main():
         ms_index = {str(p.get("externalCode")): p for p in ms_products}
         
         showcase_items = fetch_live_bouquets(pf, config["TARGET_STORE_ID"])
-        stats = {"created": 0, "updated": 0, "archived_sold": 0, "entered": 0, "img_ok": 0, "img_err": 0}
+        stats = {"created": 0, "updated": 0, "archived_sold": 0, "entered": 0, "losses": 0, "img_ok": 0, "img_err": 0}
 
-        # 1. ОБНОВЛЕНИЕ КАРТОЧЕК
         for b in showcase_items:
             existing = ms_index.get(b["id"])
             if existing:
                 payload = {}
                 if existing.get("name") != b["name"]: payload["name"] = b["name"][:255]
+                desc = existing.get("description", "")
+                if "[DEL_" in desc:
+                    payload["description"] = re.sub(r"\[DEL_\d+\]\n?", "", desc)
                 if target_meta["href"] != existing.get("productFolder", {}).get("meta", {}).get("href", ""): payload["productFolder"] = {"meta": target_meta}
                 prices = existing.get("salePrices", [])
                 curr_price = prices[0].get("value", 0) if (prices and isinstance(prices, list)) else 0
@@ -255,28 +261,53 @@ def main():
                     stats["img_ok"] += 1
                 except: stats["img_err"] += 1
 
-        # 2. АРХИВАЦИЯ
-        valid_ids = {b["id"] for b in showcase_items}
-        for code, p in ms_index.items():
-            if p.get("productFolder", {}).get("meta", {}).get("href") == target_meta["href"] and code not in valid_ids and not p.get("archived"):
-                if not dry_run:
-                    ms.request("PUT", f"/entity/product/{p['id']}", json_body={"archived": True})
-                    stats["archived_sold"] += 1
-
-        # 3. НАЧИСЛЕНИЕ ОСТАТКОВ
         stock_resp = ms.request("GET", "/report/stock/bystore/current", params={"filter": f"storeId={config['TARGET_STORE_ID']}"})
         stock_dict = {s.get("assortmentId"): safe_float(s.get("stock")) for s in (stock_resp if isinstance(stock_resp, list) else stock_resp.get("rows", []))}
+        
         enters = []
+        losses = []
+
         for b in showcase_items:
             ms_item = ms_index.get(b["id"])
             if ms_item and stock_dict.get(ms_item["id"], 0.0) < 1.0:
                 enters.append({"assortment": {"meta": ms_item["meta"]}, "quantity": 1.0, "price": 0})
         
-        if enters:
+        valid_ids = {b["id"] for b in showcase_items}
+        current_ts = int(time.time())
+        
+        for code, p in ms_index.items():
+            if p.get("productFolder", {}).get("meta", {}).get("href") == target_meta["href"] and code not in valid_ids and not p.get("archived"):
+                desc = p.get("description", "")
+                match = re.search(r"\[DEL_(\d+)\]", desc)
+                
+                if not match:
+                    new_desc = f"[DEL_{current_ts}]\n{desc}"[:4000]
+                    payload = {"description": new_desc}
+                    if not p.get("name", "").startswith("[ПРОДАНО]"):
+                        payload["name"] = f"[ПРОДАНО] {p.get('name', '')}"[:255]
+                        
+                    if not dry_run: ms.request("PUT", f"/entity/product/{p['id']}", json_body=payload)
+                    
+                    curr_qty = stock_dict.get(p["id"], 0.0)
+                    if curr_qty > 0:
+                        losses.append({"assortment": {"meta": p["meta"]}, "quantity": curr_qty, "price": 0})
+                else:
+                    mark_ts = int(match.group(1))
+                    if current_ts - mark_ts > 3600:
+                        if not dry_run: ms.request("PUT", f"/entity/product/{p['id']}", json_body={"archived": True})
+                        stats["archived_sold"] += 1
+
+        if enters or losses:
             org = {"href": f"{config['MOYSKLAD_URL']}/entity/organization/{config['ORG_ID']}", "type": "organization", "mediaType": "application/json"}
             store = {"href": f"{config['MOYSKLAD_URL']}/entity/store/{config['TARGET_STORE_ID']}", "type": "store", "mediaType": "application/json"}
-            if not dry_run: ms.request("POST", "/entity/enter", json_body={"organization": {"meta": org}, "store": {"meta": store}, "applicable": True, "positions": enters})
-            stats["entered"] = len(enters)
+            
+            if enters and not dry_run:
+                ms.request("POST", "/entity/enter", json_body={"organization": {"meta": org}, "store": {"meta": store}, "applicable": True, "positions": enters})
+                stats["entered"] = len(enters)
+                
+            if losses and not dry_run:
+                ms.request("POST", "/entity/loss", json_body={"organization": {"meta": org}, "store": {"meta": store}, "applicable": True, "positions": losses})
+                stats["losses"] = len(losses)
 
         LOG.info(f"Итоги витрины: {stats}")
     except Exception as e: LOG.error(f"Критическая ошибка витрины: {e}"); sys.exit(1)
