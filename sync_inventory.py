@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # Скрипт 2: ИНВЕНТАРЬ И ОСТАТКИ (sync_inventory.py)
-# С умным поиском по названию и поддержкой ПОДАРОЧНЫХ СЕРТИФИКАТОВ
+# С умным поиском по названию, поддержкой СЕРТИФИКАТОВ и НОВОГО ГОДА
 
 import base64
 import io
@@ -29,8 +29,9 @@ FIXED_RECIPE_QTY = 50.0
 
 BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
-# ДОБАВЛЕНА КАТЕГОРИЯ СЕРТИФИКАТОВ и обновлена "упаковка"
+# ДОБАВЛЕНА КАТЕГОРИЯ "НОВЫЙ ГОД"
 MS_FOLDER_KEYWORDS = {
+    "new_year": ["новый год", "новогод", "елка", "ель", "рождеств"], # <-- НОВАЯ КАТЕГОРИЯ
     "certificate": ["подарочный сертификат", "сертификаты", "сертификат"],
     "author": ["авторские букеты", "рецепты"], 
     "vase": ["вазы", "ваза"],
@@ -147,7 +148,6 @@ class PosifloraClient(HttpClient):
         self.token = resp.get("data", {}).get("attributes", {}).get("accessToken") or resp.get("data", {}).get("accessToken")
 
     def paginate(self, path, params, max_pages):
-        rows, included, page = 1, [], [] # small typo fixed here for safe var assignment, wait, python allows rows, included = [], []
         rows, included, page = [], [], 1
         while page <= max_pages:
             p = dict(params); p["page[number]"] = page
