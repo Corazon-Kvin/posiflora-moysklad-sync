@@ -49,7 +49,7 @@ class HttpClient:
             attempt += 1
             time.sleep(REQUEST_PAUSE)
             try:
-                resp = self.session.request(method, url, params=params, json=json_body, headers=self.build_headers(), timeout=HTTP_TIMEOUT)
+                resp = self.session.request(method, url, params=params, json=json_body, headers=self.build_headers(), timeout=HTTP_TIMEOUT, allow_redirects=False)
             except requests.RequestException as exc:
                 if attempt >= MAX_RETRIES: raise ApiError(f"{self.label}: ошибка сети {url}: {exc}")
                 time.sleep(2 * attempt)
@@ -59,26 +59,23 @@ class HttpClient:
                 time.sleep(2 * attempt)
                 continue
             if resp.status_code not in expected:
-                raise ApiError(f"{self.label}: HTTP {resp.status_code} {url} :: {resp.text[:200]}")
+                raise ApiError(f"{self.label}: HTTP {resp.status_code} при {method} {path}")
             return resp.json() if resp.content else {}
 
 class PosifloraClient(HttpClient):
-    def __init__(self, base_url, username, password):
+    def __init__(self, base_url, api_key):
+        from urllib.parse import urlsplit
+        parts = urlsplit(base_url)
+        if (parts.scheme != "https" or parts.hostname != "lakmaflowers.posiflora.com"
+                or parts.path.rstrip("/") != "/api/v1" or parts.query or parts.fragment
+                or parts.username or parts.password):
+            raise ApiError("POSIFLORA_URL должен быть https://lakmaflowers.posiflora.com/api/v1")
         super().__init__(base_url, "Posiflora")
-        self.username = username
-        self.password = password
-        self.token = ""
+        self.api_key = api_key
 
     def build_headers(self):
-        h = {"Accept": "application/vnd.api+json", "Content-Type": "application/vnd.api+json", "User-Agent": BROWSER_UA}
-        if self.token: h["Authorization"] = f"Bearer {self.token}"
-        return h
-
-    def login(self):
-        body = {"data": {"type": "sessions", "attributes": {"username": self.username, "password": self.password}}}
-        resp = self.request("POST", "/sessions", json_body=body, expected=(200, 201))
-        self.token = resp.get("data", {}).get("attributes", {}).get("accessToken") or resp.get("data", {}).get("accessToken")
-        if not self.token: raise ApiError("Posiflora: accessToken не найден")
+        return {"Accept": "application/vnd.api+json", "X-Api-Key": self.api_key,
+                "User-Agent": BROWSER_UA}
 
     def paginate(self, path, params, max_pages):
         rows, page = [], 1
@@ -91,6 +88,7 @@ class PosifloraClient(HttpClient):
             rows.extend(data)
             if len(data) < p.get("page[size]", 100): break
             page += 1
+        if page > max_pages: raise ApiError(f"Posiflora: превышен лимит страниц {path}")
         return rows
 
 class MoySkladClient(HttpClient):
@@ -136,13 +134,12 @@ def get_all_posiflora_ids(pf):
         active_ids.add(str(r.get("id")))
         
     # 2. Забираем рецепты (Авторские букеты)
-    try:
-        rec_rows = pf.paginate("/specifications", {"page[size]": 100}, MAX_PAGES)
-        for r in rec_rows:
-            active_ids.add(str(r.get("id")))
-    except Exception as e:
-        LOG.error(f"Posiflora: Ошибка при запросе рецептов: {e}")
-        
+    rec_rows = pf.paginate("/specifications", {"page[size]": 100}, MAX_PAGES)
+    for r in rec_rows:
+        active_ids.add(str(r.get("id")))
+    if not inv_rows or not rec_rows:
+        raise ApiError("Очистка отменена: один из списков Posiflora пуст")
+
     LOG.info(f"Posiflora: Всего найдено {len(active_ids)} активных позиций (инвентарь + рецепты).")
     return active_ids
 
@@ -172,25 +169,26 @@ def get_flower_folder_paths(ms):
     
     for f in folders:
         path = f.get("pathName", "")
-        if path.startswith(full_root_path) or path == ROOT_FLOWER_FOLDER:
+        if path == full_root_path or path.startswith(full_root_path + "/"):
             allowed_folder_hrefs.add(f.get("meta", {}).get("href"))
             
     return allowed_folder_hrefs
 
 def main():
-    keys = ["POSIFLORA_USER", "POSIFLORA_PASS", "POSIFLORA_URL", "MOYSKLAD_TOKEN", "MOYSKLAD_URL"]
+    keys = ["POSIFLORA_API_KEY", "POSIFLORA_URL", "MOYSKLAD_TOKEN", "MOYSKLAD_URL"]
     config = {k: os.environ.get(k, "").strip() for k in keys}
     
     missing = [k for k, v in config.items() if not v]
     if missing: 
         sys.exit(f"Ошибка: не заданы переменные: {', '.join(missing)}")
         
-    dry_run = os.environ.get("DRY_RUN", "").strip().lower() in ("1", "true", "yes", "y")
+    # Архивация заблокирована: список не включает букеты и неизвестно происхождение всех товаров.
+    dry_run = True
+    LOG.warning("Очистка работает только как отчет: архивация отключена")
 
     try:
         ms = MoySkladClient(config["MOYSKLAD_URL"], config["MOYSKLAD_TOKEN"])
-        pf = PosifloraClient(config["POSIFLORA_URL"], config["POSIFLORA_USER"], config["POSIFLORA_PASS"])
-        pf.login()
+        pf = PosifloraClient(config["POSIFLORA_URL"], config["POSIFLORA_API_KEY"])
 
         # 1. Получаем все актуальные ID из Posiflora (чтобы знать, что НЕ удалять)
         pf_active_ids = get_all_posiflora_ids(pf)
