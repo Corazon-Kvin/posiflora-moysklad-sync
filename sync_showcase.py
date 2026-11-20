@@ -104,7 +104,7 @@ class HttpClient:
             attempt += 1
             time.sleep(REQUEST_PAUSE)
             try:
-                resp = self.session.request(method, url, params=params, json=json_body, headers=self.build_headers(), timeout=HTTP_TIMEOUT)
+                resp = self.session.request(method, url, params=params, json=json_body, headers=self.build_headers(), timeout=HTTP_TIMEOUT, allow_redirects=False)
             except requests.RequestException as exc:
                 if attempt >= MAX_RETRIES: raise ApiError(f"{self.label}: ошибка сети {url}: {exc}")
                 time.sleep(2 * attempt)
@@ -114,26 +114,23 @@ class HttpClient:
                 time.sleep(2 * attempt)
                 continue
             if resp.status_code not in expected:
-                raise ApiError(f"{self.label}: HTTP {resp.status_code} {url} :: {resp.text[:200]}")
+                raise ApiError(f"{self.label}: HTTP {resp.status_code} при {method} {path}")
             return resp.json() if resp.content else {}
 
 class PosifloraClient(HttpClient):
-    def __init__(self, base_url, username, password):
+    def __init__(self, base_url, api_key):
+        from urllib.parse import urlsplit
+        parts = urlsplit(base_url)
+        if (parts.scheme != "https" or parts.hostname != "lakmaflowers.posiflora.com"
+                or parts.path.rstrip("/") != "/api/v1" or parts.query or parts.fragment
+                or parts.username or parts.password):
+            raise ApiError("POSIFLORA_URL должен быть https://lakmaflowers.posiflora.com/api/v1")
         super().__init__(base_url, "Posiflora")
-        self.username = username
-        self.password = password
-        self.token = ""
+        self.api_key = api_key
 
     def build_headers(self):
-        h = {"Accept": "application/vnd.api+json", "Content-Type": "application/vnd.api+json", "User-Agent": BROWSER_UA}
-        if self.token: h["Authorization"] = f"Bearer {self.token}"
-        return h
-
-    def login(self):
-        body = {"data": {"type": "sessions", "attributes": {"username": self.username, "password": self.password}}}
-        resp = self.request("POST", "/sessions", json_body=body, expected=(200, 201))
-        self.token = resp.get("data", {}).get("attributes", {}).get("accessToken") or resp.get("data", {}).get("accessToken")
-        if not self.token: raise ApiError("Posiflora: accessToken не найден")
+        return {"Accept": "application/vnd.api+json", "X-Api-Key": self.api_key,
+                "User-Agent": BROWSER_UA}
 
     def paginate(self, path, params, max_pages):
         rows, included, page = [], [], 1
@@ -147,6 +144,7 @@ class PosifloraClient(HttpClient):
             included.extend(body.get("included", []))
             if len(data) < p.get("page[size]", 100): break
             page += 1
+        if page > max_pages: raise ApiError(f"Posiflora: превышен лимит страниц {path}")
         return rows, included
 
 class MoySkladClient(HttpClient):
@@ -201,20 +199,22 @@ def fetch_live_bouquets(pf, store_id):
             price = extract_safe_price(r, attrs, idx)
             res.append({"id": str(r.get("id")), "name": name, "price_kopecks": int(round(price * 100)), "image_url": logo_from_included(r, idx), "qty": 1.0})
     except Exception as e:
-        LOG.error(f"Posiflora: ОШИБКА доступа к /bouquets: {e}")
+        raise ApiError(f"Не удалось получить букеты Posiflora: {e}") from e
+    if not res: raise ApiError("Нет активных букетов; обработка остановлена для проверки")
     LOG.info(f"Posiflora: В итоге отобрано {len(res)} АКТИВНЫХ букетов для витрины.")
     return res
 
 def main():
-    keys = ["POSIFLORA_USER", "POSIFLORA_PASS", "POSIFLORA_URL", "MOYSKLAD_TOKEN", "MOYSKLAD_URL", "TARGET_STORE_ID", "ORG_ID"]
+    keys = ["POSIFLORA_API_KEY", "POSIFLORA_URL", "MOYSKLAD_TOKEN", "MOYSKLAD_URL", "TARGET_STORE_ID", "ORG_ID"]
     config = {k: os.environ.get(k, "").strip() for k in keys}
     if not all(config.values()): sys.exit("Ошибка: не заданы переменные")
     dry_run = env_bool("DRY_RUN")
+    if not dry_run:
+        raise ApiError("Реальная запись отключена: сначала требуется проверка остатков и синхронизации")
 
     try:
         ms = MoySkladClient(config["MOYSKLAD_URL"], config["MOYSKLAD_TOKEN"])
-        pf = PosifloraClient(config["POSIFLORA_URL"], config["POSIFLORA_USER"], config["POSIFLORA_PASS"])
-        pf.login()
+        pf = PosifloraClient(config["POSIFLORA_URL"], config["POSIFLORA_API_KEY"])
 
         folders = ms.list_entities("/entity/productfolder")
         target_meta = next((f.get("meta") for f in folders if normalize_name(f.get("name")) == normalize_name(TARGET_FOLDER_NAME)), None)
@@ -293,7 +293,7 @@ def main():
                         losses.append({"assortment": {"meta": p["meta"]}, "quantity": curr_qty, "price": 0})
                 else:
                     mark_ts = int(match.group(1))
-                    if current_ts - mark_ts > 3600:
+                    if current_ts - mark_ts > 3600 and env_bool("ENABLE_SHOWCASE_ARCHIVE"):
                         if not dry_run: ms.request("PUT", f"/entity/product/{p['id']}", json_body={"archived": True})
                         stats["archived_sold"] += 1
 
