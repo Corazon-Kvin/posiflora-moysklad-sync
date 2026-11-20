@@ -120,32 +120,30 @@ class HttpClient:
             attempt += 1
             time.sleep(REQUEST_PAUSE)
             try:
-                resp = self.session.request(method, url, params=params, json=json_body, headers=self.build_headers(), timeout=HTTP_TIMEOUT)
+                resp = self.session.request(method, url, params=params, json=json_body, headers=self.build_headers(), timeout=HTTP_TIMEOUT, allow_redirects=False)
             except requests.RequestException as exc:
                 if attempt >= MAX_RETRIES: raise ApiError(f"{self.label}: ошибка {exc}")
                 time.sleep(2 * attempt); continue
             if resp.status_code in (429, 502, 503, 504):
-                if attempt >= MAX_RETRIES: raise ApiError(f"{self.label}: HTTP {resp.status_code}")
+                if attempt >= MAX_RETRIES: raise ApiError(f"{self.label}: HTTP {resp.status_code} при {method} {path}")
                 time.sleep(2 * attempt); continue
-            if resp.status_code not in expected: raise ApiError(f"{self.label}: HTTP {resp.status_code}")
+            if resp.status_code not in expected: raise ApiError(f"{self.label}: HTTP {resp.status_code} при {method} {path}")
             return resp.json() if resp.content else {}
 
 class PosifloraClient(HttpClient):
-    def __init__(self, base_url, username, password):
+    def __init__(self, base_url, api_key):
+        from urllib.parse import urlsplit
+        parts = urlsplit(base_url)
+        if (parts.scheme != "https" or parts.hostname != "lakmaflowers.posiflora.com"
+                or parts.path.rstrip("/") != "/api/v1" or parts.query or parts.fragment
+                or parts.username or parts.password):
+            raise ApiError("POSIFLORA_URL должен быть https://lakmaflowers.posiflora.com/api/v1")
         super().__init__(base_url, "Posiflora")
-        self.username = username
-        self.password = password
-        self.token = ""
+        self.api_key = api_key
 
     def build_headers(self):
-        h = {"Accept": "application/vnd.api+json", "Content-Type": "application/vnd.api+json", "User-Agent": BROWSER_UA}
-        if self.token: h["Authorization"] = f"Bearer {self.token}"
-        return h
-
-    def login(self):
-        body = {"data": {"type": "sessions", "attributes": {"username": self.username, "password": self.password}}}
-        resp = self.request("POST", "/sessions", json_body=body, expected=(200, 201))
-        self.token = resp.get("data", {}).get("attributes", {}).get("accessToken") or resp.get("data", {}).get("accessToken")
+        return {"Accept": "application/vnd.api+json", "X-Api-Key": self.api_key,
+                "User-Agent": BROWSER_UA}
 
     def paginate(self, path, params, max_pages):
         rows, included, page = [], [], 1
@@ -159,21 +157,30 @@ class PosifloraClient(HttpClient):
             included.extend(body.get("included", []))
             if len(data) < p.get("page[size]", 100): break
             page += 1
+        if page > max_pages: raise ApiError(f"Posiflora: превышен лимит страниц {path}")
         return rows, included
 
     def get_first_store_id(self):
-        try:
-            resp = self.request("GET", "/stores")
-            return str(resp.get("data", [])[0]["id"])
-        except: return None
+        resp = self.request("GET", "/stores")
+        stores = resp.get("data")
+        if not isinstance(stores, list) or not stores or not stores[0].get("id"):
+            raise ApiError("Posiflora: не удалось определить склад")
+        return str(stores[0]["id"])
 
     def get_inventory_qty(self, item_id, store_id):
-        if not store_id: return 0.0
+        body = self.request("GET", f"/inventory-items/{item_id}/stats-by-store/{store_id}")
+        data = body.get("data") or {}
+        val = (data.get("attributes") or {}).get("qty")
+        if val is None: val = data.get("qty")
+        if val is None or isinstance(val, bool):
+            raise ApiError(f"Posiflora: неизвестен остаток товара {item_id}; синхронизация остановлена")
         try:
-            body = self.request("GET", f"/inventory-items/{item_id}/stats-by-store/{store_id}")
-            val = body.get("data", {}).get("attributes", {}).get("qty") or body.get("data", {}).get("qty")
-            return max(safe_float(val), 0.0) if val is not None else 0.0
-        except ApiError: return 0.0
+            result = float(str(val).strip().replace(",", ".").replace(" ", ""))
+        except ValueError:
+            raise ApiError(f"Posiflora: неверный остаток товара {item_id}")
+        import math
+        if not math.isfinite(result): raise ApiError("Остаток не является числом")
+        return max(result, 0.0)
 
 class MoySkladClient(HttpClient):
     def __init__(self, base_url, token):
@@ -230,8 +237,7 @@ def fetch_inventory_from_pf(pf, store_id):
     return res
 
 def fetch_recipes_from_pf(pf, store_id):
-    try: rows, included = pf.paginate("/specifications", {"include": "category,logo,images,prices", "page[size]": 100}, MAX_PAGES)
-    except: return []
+    rows, included = pf.paginate("/specifications", {"include": "category,logo,images,prices", "page[size]": 100}, MAX_PAGES)
     idx, res = build_included_index(included), []
     for r in rows:
         attrs = r.get("attributes", {})
@@ -250,15 +256,16 @@ def fetch_recipes_from_pf(pf, store_id):
     return res
 
 def main():
-    keys = ["POSIFLORA_USER", "POSIFLORA_PASS", "POSIFLORA_URL", "MOYSKLAD_TOKEN", "MOYSKLAD_URL", "TARGET_STORE_ID", "ORG_ID"]
+    keys = ["POSIFLORA_API_KEY", "POSIFLORA_URL", "MOYSKLAD_TOKEN", "MOYSKLAD_URL", "TARGET_STORE_ID", "ORG_ID"]
     config = {k: os.environ.get(k, "").strip() for k in keys}
     if not all(config.values()): sys.exit("Ошибка конфигурации")
     dry_run = env_bool("DRY_RUN")
+    if not dry_run:
+        raise ApiError("Реальная запись отключена: сначала требуется проверка остатков и синхронизации")
 
     try:
         ms = MoySkladClient(config["MOYSKLAD_URL"], config["MOYSKLAD_TOKEN"])
-        pf = PosifloraClient(config["POSIFLORA_URL"], config["POSIFLORA_USER"], config["POSIFLORA_PASS"])
-        pf.login()
+        pf = PosifloraClient(config["POSIFLORA_URL"], config["POSIFLORA_API_KEY"])
         pf_store_id = pf.get_first_store_id()
 
         folders = ms.list_entities("/entity/productfolder")
