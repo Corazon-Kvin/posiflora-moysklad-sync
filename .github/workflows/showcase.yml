@@ -19,7 +19,7 @@ jobs:
           pip install requests Pillow
       - name: Run sync_showcase.py
         env:
-          DRY_RUN: "true"
+          DRY_RUN: "false"
           POSIFLORA_API_KEY: ${{ secrets.POSIFLORA_API_KEY }}
           POSIFLORA_URL: ${{ secrets.POSIFLORA_URL }}
           MOYSKLAD_TOKEN: ${{ secrets.MOYSKLAD_TOKEN }}
