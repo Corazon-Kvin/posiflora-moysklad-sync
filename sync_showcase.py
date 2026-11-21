@@ -209,8 +209,6 @@ def main():
     config = {k: os.environ.get(k, "").strip() for k in keys}
     if not all(config.values()): sys.exit("Ошибка: не заданы переменные")
     dry_run = env_bool("DRY_RUN")
-    if not dry_run:
-        raise ApiError("Реальная запись отключена: сначала требуется проверка остатков и синхронизации")
 
     try:
         ms = MoySkladClient(config["MOYSKLAD_URL"], config["MOYSKLAD_TOKEN"])
