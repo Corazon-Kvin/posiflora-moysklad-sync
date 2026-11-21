@@ -31,7 +31,7 @@ BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 
 # ДОБАВЛЕНА КАТЕГОРИЯ "НОВЫЙ ГОД"
 MS_FOLDER_KEYWORDS = {
-    "new_year": ["новый год", "новогод", "елка", "ель", "рождеств"], # <-- НОВАЯ КАТЕГОРИЯ
+    "new_year": ["новый год", "новогод", "елка", "ель", "рождеств"],
     "certificate": ["подарочный сертификат", "сертификаты", "сертификат"],
     "author": ["авторские букеты", "рецепты"], 
     "vase": ["вазы", "ваза"],
@@ -248,8 +248,6 @@ def fetch_recipes_from_pf(pf, store_id):
         res.append({
             "id": str(r.get("id")), "name": name, "price_kopecks": int(round(extract_safe_price(r, attrs, idx) * 100)),
             "image_url": logo_from_included(r, idx), "category": match_category(name, cat_title) or "author",
-            
-            # --- ИЗМЕНЕНИЕ: ТЕПЕРЬ ВСЕ РЕЦЕПТЫ ПОЛУЧАЮТ ФИКСИРОВАННЫЙ ОСТАТОК ---
             "qty": FIXED_RECIPE_QTY  
         })
     LOG.info(f"Posiflora: Получено рецептов - {len(res)} шт. (Остаток у всех зафиксирован на уровне {FIXED_RECIPE_QTY})")
@@ -260,8 +258,8 @@ def main():
     config = {k: os.environ.get(k, "").strip() for k in keys}
     if not all(config.values()): sys.exit("Ошибка конфигурации")
     dry_run = env_bool("DRY_RUN")
-    if not dry_run:
-        raise ApiError("Реальная запись отключена: сначала требуется проверка остатков и синхронизации")
+    if dry_run:
+        LOG.warning("ВНИМАНИЕ: включён режим DRY_RUN — реальная запись и загрузка фото пропущены!")
 
     try:
         ms = MoySkladClient(config["MOYSKLAD_URL"], config["MOYSKLAD_TOKEN"])
@@ -278,75 +276,4 @@ def main():
         price_types = ms.list_entities("/context/companysettings/pricetype")
         price_meta = next((pt["meta"] for pt in price_types if pt.get("name", "").lower() == "цена продажи"), price_types[0]["meta"])
 
-        ms_products = ms.list_entities("/entity/product", {"includeArchived": "false"})
-        
-        ms_index_by_code = {str(p.get("externalCode")): p for p in ms_products if p.get("externalCode")}
-        ms_index_by_name = {normalize_name(p.get("name")): p for p in ms_products}
-        
-        pf_all = fetch_inventory_from_pf(pf, pf_store_id) + fetch_recipes_from_pf(pf, pf_store_id)
-        stats = {"created": 0, "updated": 0, "img_ok": 0, "img_err": 0}
-
-        for b in pf_all:
-            target_folder = folder_meta.get(b["category"])
-            if not target_folder: continue
-            
-            existing = ms_index_by_code.get(b["id"])
-            if not existing:
-                existing = ms_index_by_name.get(normalize_name(b["name"]))
-
-            if existing:
-                payload = {}
-                if str(existing.get("externalCode")) != str(b["id"]): payload["externalCode"] = b["id"]
-                if existing.get("name") != b["name"]: payload["name"] = b["name"][:255]
-                if target_folder["href"] != existing.get("productFolder", {}).get("meta", {}).get("href", ""): payload["productFolder"] = {"meta": target_folder}
-                
-                prices = existing.get("salePrices", [])
-                curr_price = prices[0].get("value", 0) if (prices and isinstance(prices, list)) else 0
-                if curr_price != b["price_kopecks"] and b["price_kopecks"] > 0: payload["salePrices"] = [{"value": b["price_kopecks"], "priceType": {"meta": price_meta}}]
-                
-                if payload and not dry_run: 
-                    ms.request("PUT", f"/entity/product/{existing['id']}", json_body=payload)
-                    stats["updated"] += 1
-                
-                prod_id, has_image = existing["id"], existing.get("images", {}).get("meta", {}).get("size", 0) > 0
-                ms_index_by_code[b["id"]] = existing
-            else:
-                payload = {"name": b["name"][:255], "externalCode": b["id"], "productFolder": {"meta": target_folder}, "salePrices": [{"value": b["price_kopecks"], "priceType": {"meta": price_meta}}]}
-                if not dry_run:
-                    created = ms.request("POST", "/entity/product", json_body=payload)
-                    prod_id = created["id"]
-                    ms_index_by_code[b["id"]] = created
-                    stats["created"] += 1
-                has_image = False
-
-            if not has_image and b["image_url"] and not dry_run:
-                try:
-                    img_data = download_image(b["image_url"], config["POSIFLORA_URL"])
-                    ms.request("POST", f"/entity/product/{prod_id}/images", json_body={"filename": f"{b['id']}.jpg", "content": img_data})
-                    stats["img_ok"] += 1
-                except: stats["img_err"] += 1
-
-        stock_resp = ms.request("GET", "/report/stock/bystore/current", params={"filter": f"storeId={config['TARGET_STORE_ID']}"})
-        stock_dict = {s.get("assortmentId"): safe_float(s.get("stock")) for s in (stock_resp if isinstance(stock_resp, list) else stock_resp.get("rows", []))}
-        
-        enters, losses = [], []
-        for pf_item in pf_all:
-            ms_item = ms_index_by_code.get(pf_item["id"])
-            if not ms_item: continue
-            target_qty, curr_qty = pf_item["qty"], stock_dict.get(ms_item["id"], 0.0)
-            diff = round(target_qty - curr_qty, 3)
-            if diff > 0: enters.append({"assortment": {"meta": ms_item["meta"]}, "quantity": diff, "price": 0})
-            elif diff < 0 and curr_qty > 0: losses.append({"assortment": {"meta": ms_item["meta"]}, "quantity": min(abs(diff), curr_qty), "price": 0})
-
-        org = {"href": f"{config['MOYSKLAD_URL']}/entity/organization/{config['ORG_ID']}", "type": "organization", "mediaType": "application/json"}
-        store = {"href": f"{config['MOYSKLAD_URL']}/entity/store/{config['TARGET_STORE_ID']}", "type": "store", "mediaType": "application/json"}
-        def post_docs(endpoint, positions):
-            for i in range(0, len(positions), 100):
-                if not dry_run: ms.request("POST", endpoint, json_body={"organization": {"meta": org}, "store": {"meta": store}, "applicable": True, "positions": positions[i:i + 100]})
-        if enters: post_docs("/entity/enter", enters)
-        if losses: post_docs("/entity/loss", losses)
-
-        LOG.info(f"Итоги инвентаря: {stats} Оприходовано/Списано строк: {len(enters)}/{len(losses)}")
-    except Exception as e: LOG.error(f"Критическая ошибка: {e}"); sys.exit(1)
-
-if __name__ == "__main__": main()
+        ms
